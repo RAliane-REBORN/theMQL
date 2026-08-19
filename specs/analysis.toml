@@ -1,0 +1,33 @@
+[subsystem]
+name = "analysis"
+crate = "themql-analysis"
+domain = "desktop"
+
+[framework]
+dataframe = "polars"
+
+[capabilities]
+telemetry_analysis = true
+feature_engineering = true
+dataset_generation = true
+statistical_analysis = true
+batch_processing = true
+parallel_processing = true
+
+[parallelism]
+implementation = "rayon"
+
+[thedaf]
+enabled = true
+role = "background_implementation"
+purpose = [
+    "legacy_data_access",
+    "analysis_support",
+    "telemetry_processing",
+    "migration_reference"
+]
+
+[constraints]
+thedaf_core_dependency = false
+thedaf_embedded_dependency = false
+polars_semantic_owner = true

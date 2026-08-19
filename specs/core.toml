@@ -1,0 +1,219 @@
+[subsystem]
+name = "core"
+crate = "themql-core"
+domain = "core"
+semantic_owner = true
+canonical = true
+
+[purpose]
+description = """
+Canonical owner of theMQL's core type identities: Message, Query,
+Response, Error, Context, and Resource identity. Other subsystem specs
+(message.toml, query.toml) are subordinate to this file and specialise
+specific aspects (routing, resolution, caching) without redefining the
+types themselves.
+"""
+
+[references]
+subordinate_specs = [
+    "specs/message.toml",
+    "specs/query.toml"
+]
+
+[types]
+canonical = [
+    "Message",
+    "Query",
+    "Response",
+    "Error",
+    "Context",
+    "Resource"
+]
+
+[types.Message]
+description = """
+The fundamental primitive. Every request, command, event, stream,
+response, telemetry reading, and error is carried by a Message.
+"""
+required_fields = [
+    "id",
+    "timestamp",
+    "subject",
+    "operation",
+    "payload",
+    "metadata"
+]
+
+[types.Message.fields]
+id = "MessageId — unique identifier"
+timestamp = "Timestamp — monotonic or wall-clock, explicitly tagged"
+subject = "Subject — hierarchical routing key (e.g. 'vehicle.sensors.imu.gyro')"
+operation = "Operation — one of the values in [operations.allowed]"
+payload = "Payload — explicitly typed, serde-serialisable"
+metadata = "Metadata — key-value bag for correlation, causation, trace ids, auth"
+
+[types.Message.identity]
+primary = "MessageId"
+correlation = "CorrelationId — optional, links responses to requests"
+causation = "CausationId — optional, links events to the command that caused them"
+
+[types.Message.operations]
+allowed = [
+    "query",
+    "command",
+    "event",
+    "stream",
+    "response",
+    "telemetry",
+    "error"
+]
+
+[types.Query]
+description = """
+A read-only, side-effect-free request against a named Resource. A Query
+is always carried inside a Message with operation = 'query'.
+"""
+required_fields = [
+    "resource",
+    "selection",
+    "context"
+]
+optional_fields = [
+    "arguments",
+    "projection",
+    "cache_policy",
+    "deadline"
+]
+
+[types.Query.semantics]
+read_only = true
+side_effect_free = true
+resolver_based = true
+transport_independent = true
+
+[types.Response]
+description = """
+The result of a Query or Command. Carried inside a Message with
+operation = 'response'. A Response contains either a value or an Error;
+never both, never neither.
+"""
+shape = "Result<Value, Error>"
+correlation_required = true
+
+[types.Error]
+description = """
+The canonical error type. Transport adapters project this into
+GraphQL errors, MQTT error topics, SSE error frames, etc. Transport
+adapters must not define their own error types.
+"""
+fields = [
+    "code",
+    "message",
+    "subject",
+    "correlation_id",
+    "causation_id",
+    "details"
+]
+
+[types.Error.codes]
+transport_error = "transport-level failure"
+resolver_error = "resolver could not fulfil the query"
+cache_miss = "authoritative miss and no resolver"
+validation_error = "input failed validation"
+timeout = "deadline exceeded"
+internal_error = "unexpected internal failure"
+
+[types.Context]
+description = """
+Execution context propagated through every query resolution and
+command dispatch. Carries deadline, auth principal, trace id,
+cache policy, and cancellation signal.
+"""
+fields = [
+    "deadline",
+    "principal",
+    "trace_id",
+    "cache_policy",
+    "cancellation"
+]
+
+[types.Resource]
+description = """
+A named, addressable entity in theMQL. Every Query targets a
+Resource. Resources have a hierarchical identity (e.g.
+'vehicle.sensors.imu.gyro').
+"""
+identity = "hierarchical_subject"
+addressable = true
+
+[serialization]
+explicit = true
+serde_allowed = true
+binary_supported = true
+text_supported = true
+format_negotiable = true
+
+[api]
+public_types = [
+    "Message",
+    "MessageId",
+    "CorrelationId",
+    "CausationId",
+    "Operation",
+    "Subject",
+    "Payload",
+    "Metadata",
+    "Query",
+    "Resource",
+    "Selection",
+    "Projection",
+    "Response",
+    "Error",
+    "ErrorCode",
+    "Context",
+    "CachePolicy",
+    "Deadline"
+]
+traits = [
+    "Resolver",
+    "MessageHandler",
+    "QueryExecutor"
+]
+
+[api.Resolver]
+signature = "async fn resolve(&self, query: &Query, ctx: &Context) -> Result<Response, Error>"
+
+[api.MessageHandler]
+signature = "async fn handle(&self, msg: &Message) -> Result<Response, Error>"
+
+[error_model]
+canonical = "themql_core::Error"
+transport_adapters_project = true
+transport_adapters_define_own = false
+propagation = "Result<Response, Error>"
+no_panic_in_public_api = true
+
+[lifecycle]
+message_creation = "explicit — caller constructs Message"
+query_resolution = "async — resolver returns Result<Response, Error>"
+response_publication = "Message with operation = 'response' published to subject"
+error_publication = "Message with operation = 'error' published to subject"
+cancellation = "Context.cancellation propagates through resolution chain"
+
+[threading]
+send_required = true
+sync_optional = true
+async_required = true
+clone_minimization = true
+ownership_explicit = true
+
+[constraints]
+no_transport_specific_message_type = true
+no_duplicate_message_model = true
+no_duplicate_query_model = true
+no_duplicate_error_model = true
+no_transport_specific_error_type = true
+ownership_explicit = true
+clone_minimization = true
+response_contains_value_or_error_never_both = true
+response_contains_value_or_error_never_neither = true

@@ -1,0 +1,101 @@
+[subsystem]
+name = "mqtt"
+crate = "themql-mqtt"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+MQTT transport adapter for theMQL. Uses embassy for embedded MQTT and
+delegates to tokio-based MQTT clients on desktop when needed. MQTT is a
+transport, not a semantic owner. MQTT-specific types must not escape
+this crate.
+"""
+
+[references]
+related = [
+    "specs/transport.toml",
+    "specs/core.toml",
+    "specs/message.toml"
+]
+
+[implementation]
+library = "embassy"
+embedded_executor = "embassy-executor"
+synchronization = "embassy-sync"
+desktop_runtime = "tokio"
+role = "mqtt_transport_projection"
+
+[topics]
+subject_mapping = "themql-core Subject <-> MQTT topic (1:1)"
+hierarchical_subjects = true
+wildcards = "MQTT +/# wildcards map to themql-core Subject hierarchy"
+retained = "supported for last-known-value telemetry"
+qos = "configurable per subject; default QoS 1"
+
+[api]
+public_traits = [
+    "MqttTransport",
+    "MqttPublisher",
+    "MqttSubscriber"
+]
+
+[api.MqttTransport]
+description = "Top-level MQTT transport handle"
+methods = [
+    "async fn publish(&self, topic: &Subject, payload: &Message) -> Result<(), MqttError>",
+    "async fn subscribe(&self, topic: &Subject, handler: impl MessageHandler) -> Result<SubscriptionId, MqttError>"
+]
+
+[api.MqttPublisher]
+description = "Write-only publisher for telemetry / command dispatch"
+methods = [
+    "async fn publish(&self, topic: &Subject, payload: &Message) -> Result<(), MqttError>"
+]
+
+[api.MqttSubscriber]
+description = "Read-only subscriber for telemetry acquisition / command reception"
+methods = [
+    "async fn subscribe(&self, topic: &Subject, handler: impl MessageHandler) -> Result<SubscriptionId, MqttError>",
+    "async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), MqttError>"
+]
+
+[mapping]
+"Message" = "MQTT payload bytes + topic derived from Subject"
+"Subject" = "MQTT topic string (hierarchical, dot-separated)"
+"Operation" = "encoded in payload, not MQTT topic"
+"Response" = "published on reply-to subject from metadata.correlation_id"
+"Error" = "published on reply-to subject with operation = 'error'"
+
+[error_model]
+variants = [
+    "ConnectionLost",
+    "PublishFailed",
+    "SubscribeFailed",
+    "DeserializationError",
+    "QosViolation",
+    "Timeout"
+]
+propagation = "Result<T, MqttError>"
+mapping_to_core_error = "MqttError -> themql_core::Error::transport_error"
+no_duplicate_error_type = true
+
+[lifecycle]
+connection = "managed by runtime; auto-reconnect policy explicit"
+publish = "async, returns on broker ACK at configured QoS"
+subscribe = "async, handler invoked per incoming message"
+retained = "broker stores last message; new subscribers receive it immediately"
+failure = "MqttError propagated; no silent reconnect without explicit policy"
+
+[threading]
+send_required = true
+sync_optional = true
+async_required = true
+no_blocking_in_async = true
+embedded_capable = true
+
+[constraints]
+business_logic_in_transport = false
+transport_specific_domain_model = false
+mqtt_types_must_not_escape_adapter = true
+implicit_reconnect = false
+blocking_in_async = false

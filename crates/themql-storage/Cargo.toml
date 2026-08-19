@@ -1,0 +1,13 @@
+[package]
+name = "themql-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "themql_storage"
+path = "src/lib.rs"
+
+[dependencies]
+helix-db.workspace = true
+serde.workspace = true

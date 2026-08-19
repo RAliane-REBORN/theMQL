@@ -1,0 +1,92 @@
+[subsystem]
+name = "sse"
+crate = "themql-sse"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+Server-Sent Events stream projection of theMQL's message model. SSE
+is a one-way server-to-client stream used for telemetry, events, and
+query subscription results. SSE-specific types must not escape this
+crate.
+"""
+
+[references]
+related = [
+    "specs/transport.toml",
+    "specs/core.toml",
+    "specs/message.toml"
+]
+
+[implementation]
+library = "tokio"
+role = "sse_stream_projection"
+desktop_only = true
+
+[streaming]
+direction = "server_to_client"
+protocol = "text/event-stream"
+event_format = "JSON-encoded themql-core Message payload"
+retry_supported = true
+last_event_id_supported = true
+
+[api]
+public_traits = [
+    "SseStream",
+    "SsePublisher"
+]
+
+[api.SseStream]
+description = "A live SSE stream from a subject"
+methods = [
+    "async fn next_event(&mut self) -> Result<Option<SseEvent>, SseError>",
+    "fn subject(&self) -> &Subject"
+]
+
+[api.SsePublisher]
+description = "Server-side publisher that pushes Messages to connected SSE clients"
+methods = [
+    "async fn broadcast(&self, subject: &Subject, msg: &Message) -> Result<(), SseError>",
+    "async fn add_subscriber(&self, subject: &Subject) -> Result<SseStream, SseError>"
+]
+
+[mapping]
+"Message" = "SSE event with JSON payload"
+"Subject" = "SSE endpoint URL path or event type"
+"Operation" = "SSE event field"
+"Response" = "SSE event with operation = 'response'"
+"Error" = "SSE event with operation = 'error'"
+"Stream" = "SSE stream of Message events"
+
+[error_model]
+variants = [
+    "ConnectionClosed",
+    "SerializationError",
+    "Timeout",
+    "ClientDisconnected",
+    "InternalError"
+]
+propagation = "Result<T, SseError>"
+mapping_to_core_error = "SseError -> themql_core::Error::transport_error"
+no_duplicate_error_type = true
+
+[lifecycle]
+connection = "HTTP upgrade to text/event-stream, kept alive by server"
+event = "JSON-encoded Message written to stream"
+heartbeat = "optional comment-line keepalive every N seconds"
+failure = "SseError propagated; stream closed on error"
+reconnect = "client-driven via Last-Event-ID; server best-effort replay"
+
+[threading]
+send_required = true
+sync_optional = true
+async_required = true
+no_blocking_in_async = true
+desktop_only = true
+
+[constraints]
+business_logic_in_transport = false
+transport_specific_domain_model = false
+sse_types_must_not_escape_adapter = true
+blocking_in_async = false
+embedded_capable = false

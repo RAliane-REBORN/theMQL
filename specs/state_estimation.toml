@@ -1,0 +1,43 @@
+[subsystem]
+name = "state_estimation"
+crate = "themql-estimation"
+domain = "embedded"
+
+[primary]
+algorithm = "EKF"
+
+[state]
+position = true
+velocity = true
+attitude = true
+angular_velocity = true
+
+[attitude]
+representation = "quaternion"
+euler_angles_canonical = false
+gimbal_lock_avoidance = true
+
+[bias]
+accelerometer = true
+gyroscope = true
+
+[bayesian]
+enabled = true
+updating = true
+sampling = true
+uncertainty_propagation = true
+
+[sensor_fusion]
+gps = true
+barometer = true
+imu = true
+
+[ml]
+allowed_as_state_correction = true
+primary_estimator = false
+required_for_basic_operation = false
+
+[constraints]
+deterministic_ekf_path = true
+ml_failure_must_not_disable_ekf = true
+sensor_failure_detection = true

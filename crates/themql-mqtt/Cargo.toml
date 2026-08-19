@@ -1,0 +1,15 @@
+[package]
+name = "themql-mqtt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "themql_mqtt"
+path = "src/lib.rs"
+
+[dependencies]
+embassy-executor.workspace = true
+embassy-sync.workspace = true
+themql-core.workspace = true
+themql-message.workspace = true

@@ -1,0 +1,46 @@
+[subsystem]
+name = "cache"
+crate = "themql-cache"
+
+[architecture]
+tiered = true
+tiers = ["L1", "L2", "L3", "L4"]
+promotion = true
+demotion = true
+invalidation = true
+
+[L1]
+implementation = "cachelito"
+scope = "local"
+authority = "ephemeral"
+latency = "ultra_low"
+
+[L2]
+implementation = "moka"
+scope = "local"
+authority = "ephemeral"
+latency = "low"
+
+[L3]
+implementation = "valkey"
+scope = "distributed"
+authority = "ephemeral"
+latency = "network"
+
+[L4]
+implementation = "helixdb"
+scope = "authoritative"
+authority = "persistent"
+
+[semantics]
+miss = "next_tier"
+authoritative_miss = "resolver_or_error"
+cache_key = "deterministic"
+ttl = "explicit"
+invalidation = "explicit"
+
+[constraints]
+custom_cache_engine = false
+duplicate_cache_semantics = false
+hidden_cache = false
+implicit_invalidation = false

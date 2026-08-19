@@ -1,0 +1,36 @@
+[subsystem]
+name = "runtime"
+crate = "themql-runtime"
+
+[desktop]
+runtime = "tokio"
+
+[embedded]
+runtime = "embassy"
+
+[queue]
+implementation = "apalis"
+purpose = [
+    "background_jobs",
+    "asynchronous_processing",
+    "message_workflows"
+]
+
+[parallelism]
+implementation = "rayon"
+purpose = [
+    "cpu_bound_work",
+    "parallel_analysis",
+    "desktop_training_support"
+]
+
+[concurrency]
+structured = true
+cancellation = true
+backpressure = true
+bounded_channels_preferred = true
+
+[constraints]
+blocking_work_on_async_executor = false
+unbounded_channels_by_default = false
+implicit_global_runtime = false

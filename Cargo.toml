@@ -1,0 +1,99 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/themql-core",
+    "crates/themql-message",
+    "crates/themql-query",
+    "crates/themql-runtime",
+    "crates/themql-cache",
+    "crates/themql-storage",
+    "crates/themql-transport",
+    "crates/themql-graphql",
+    "crates/themql-mqtt",
+    "crates/themql-sse",
+    "crates/themql-telemetry",
+    "crates/themql-analysis",
+    "crates/themql-training",
+    "crates/themql-inference",
+    "crates/themql-gnc",
+    "crates/themql-estimation",
+    "crates/themql-artifact",
+    "crates/themql-embedded",
+    "crates/themql-desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Metis-Avionics/theMQL"
+authors = ["Metis Avionics"]
+
+# Versions resolved against crates.io 2026-08-19.
+# Crate Cargo.tomls reference these via `dep.workspace = true`.
+[workspace.dependencies]
+# Core / runtime
+tokio = "1"
+rayon = "1"
+apalis = "0.6"
+serde = "1"
+serde_json = "1"
+
+# Transport / API
+async-graphql = "8.0.0-rc.5"
+embassy-sync = "0.8"
+embassy-executor = "0.10"
+
+# Cache / storage
+cachelito = "0.16"
+moka = "0.12"
+valkey = "0.0.0-alpha5"
+helix-db = "3"
+
+# Desktop / analysis
+dioxus = "0.5"
+polars = "0.55"
+
+# ML
+tch = "0.24"
+ndarray = "0.17"
+
+# Tooling
+clap = "4"
+ratatui = "0.30"
+
+# Internal crates — self-references for cross-crate deps via workspace=true
+themql-core = { path = "crates/themql-core" }
+themql-message = { path = "crates/themql-message" }
+themql-query = { path = "crates/themql-query" }
+themql-runtime = { path = "crates/themql-runtime" }
+themql-cache = { path = "crates/themql-cache" }
+themql-storage = { path = "crates/themql-storage" }
+themql-transport = { path = "crates/themql-transport" }
+themql-graphql = { path = "crates/themql-graphql" }
+themql-mqtt = { path = "crates/themql-mqtt" }
+themql-sse = { path = "crates/themql-sse" }
+themql-telemetry = { path = "crates/themql-telemetry" }
+themql-analysis = { path = "crates/themql-analysis" }
+themql-training = { path = "crates/themql-training" }
+themql-inference = { path = "crates/themql-inference" }
+themql-gnc = { path = "crates/themql-gnc" }
+themql-estimation = { path = "crates/themql-estimation" }
+themql-artifact = { path = "crates/themql-artifact" }
+themql-embedded = { path = "crates/themql-embedded" }
+themql-desktop = { path = "crates/themql-desktop" }
+
+[profile.dev]
+debug = true
+split-debuginfo = "unpacked"
+
+[profile.release]
+debug = false
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+debug = false
+lto = "thin"
+codegen-units = 1

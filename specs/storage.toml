@@ -1,0 +1,105 @@
+[subsystem]
+name = "storage"
+crate = "themql-storage"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+Authoritative storage adapter for theMQL. Wraps HelixDB as the L4
+authoritative tier of the cache stack and the durable persistence layer
+for telemetry, model artifacts, and query results that must survive
+process restarts.
+"""
+
+[references]
+related = [
+    "specs/cache.toml",
+    "specs/model_artifact.toml",
+    "specs/telemetry.toml"
+]
+
+[implementation]
+library = "helix-db"
+crate_registry_name = "helix-db"
+version = "3"
+role = "authoritative_storage_and_l4_cache"
+
+[api]
+public_traits = [
+    "Storage",
+    "StorageReader",
+    "StorageWriter"
+]
+
+[api.Storage]
+description = "Top-level trait combining read + write + delete + query"
+methods = [
+    "async fn get(&self, key: &StorageKey) -> Result<Option<StorageValue>, StorageError>",
+    "async fn put(&self, key: &StorageKey, value: StorageValue) -> Result<(), StorageError>",
+    "async fn delete(&self, key: &StorageKey) -> Result<(), StorageError>",
+    "async fn query(&self, q: &StorageQuery) -> Result<StorageResultSet, StorageError>"
+]
+
+[api.StorageReader]
+description = "Read-only view for query resolvers"
+methods = [
+    "async fn get(&self, key: &StorageKey) -> Result<Option<StorageValue>, StorageError>",
+    "async fn query(&self, q: &StorageQuery) -> Result<StorageResultSet, StorageError>"
+]
+
+[api.StorageWriter]
+description = "Write-only view for telemetry ingest, artifact persistence"
+methods = [
+    "async fn put(&self, key: &StorageKey, value: StorageValue) -> Result<(), StorageError>",
+    "async fn delete(&self, key: &StorageKey) -> Result<(), StorageError>"
+]
+
+[types]
+StorageKey = "string or structured key — implementation-defined, stable hash"
+StorageValue = "serialized bytes with explicit format tag"
+StorageQuery = "query against stored data — implementation maps to HelixDB query DSL"
+StorageResultSet = "stream or collection of StorageValue"
+StorageError = "canonical storage error enum"
+
+[error_model]
+variants = [
+    "NotFound",
+    "AlreadyExists",
+    "ConnectionFailed",
+    "Timeout",
+    "SerializationError",
+    "QueryError",
+    "InternalError"
+]
+propagation = "Result<T, StorageError>"
+mapping_to_core_error = "StorageError -> themql_core::Error::internal_error or resolver_error"
+
+[cache_integration]
+tier = "L4"
+authority = "persistent"
+miss_behaviour = "StorageError::NotFound — no further tier to fall through to"
+write_through = true
+write_back = false
+consistency = "strong"
+
+[lifecycle]
+connection = "pool managed by themql-storage, lifetime tied to runtime"
+write = "async, returns on durable acknowledgement"
+read = "async, streams or returns single value"
+failure = "StorageError propagated to caller; no silent retry without explicit policy"
+retry = "explicit policy only — no implicit retries"
+
+[threading]
+send_required = true
+sync_optional = true
+connection_pool_shared = true
+no_blocking_in_async = true
+
+[constraints]
+custom_database_engine = false
+business_logic_in_storage = false
+storage_specific_domain_model = false
+implicit_retry = false
+implicit_cache = false
+blocking_in_async = false
+storage_types_must_not_escape_adapter = true
