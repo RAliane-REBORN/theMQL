@@ -505,7 +505,7 @@ wire_format_shared_with_host = true
 This is where the architecture starts getting genuinely interesting.
 
 The same conceptual message should be able to originate from:
-
+```
 ESP32
      ↓
 Embassy
@@ -517,7 +517,7 @@ theMQL
 GraphQL
      ↓
 browser
-
+```
 without the embedded side needing to understand the web side.
 
 
@@ -714,7 +714,7 @@ Required validation:
 If any architectural constraint would be violated, stop rather than creating a workaround.
 
 At completion report:
-
+```
 SUBSYSTEM:
 CHANGE:
 FILES:
@@ -722,7 +722,7 @@ DEPENDENCIES USED:
 INVARIANTS PRESERVED:
 TESTS:
 RISKS:
-
+```
 The development order I'd use
 
 Not "build everything."
