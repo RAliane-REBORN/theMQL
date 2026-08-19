@@ -728,7 +728,7 @@ The development order I'd use
 Not "build everything."
 
 Build the semantic spine first:
-
+```
 Phase 0
 ├── SPEC.toml
 ├── subsystem specs
@@ -779,7 +779,7 @@ Phase 8
 ├── clap
 ├── Ratatui
 └── operational tooling
-
+```
 The important architectural invariant throughout all eight phases is:
 
 theMQL core must remain unaware of whether a message came from MQTT, GraphQL, SSE, an Apalis worker, an ESP32, or a CLI.
