@@ -2,7 +2,7 @@
 
 
 1. Repository contract
-
+```
 theMQL/
 ├── SPEC.toml
 ├── Cargo.toml
@@ -40,7 +40,7 @@ theMQL/
     ├── themql-embedded/
     ├── themql-cli/
     └── themql-graphql/
-
+```
 The critical distinction:
 
 core defines semantics. Everything else implements those semantics.
@@ -52,6 +52,7 @@ No subsystem gets to quietly redefine what a message, query, cache hit, resolver
 
 2. Main specification
 
+```
 SPEC.toml
 
 [project]
@@ -195,7 +196,7 @@ public_api_requires_documentation = true
 abi = "none"
 wire_protocol = "explicit"
 serialization = "explicit"
-
+```
 That file establishes the constitution.
 
 The subsystem specs then define how individual organs obey the constitution.
@@ -206,7 +207,7 @@ The subsystem specs then define how individual organs obey the constitution.
 3. Message subsystem
 
 specs/message.toml
-
+```
 [subsystem]
 name = "message"
 crate = "themql-message"
@@ -255,14 +256,14 @@ text_supported = true
 transport_independent = true
 clone_minimization = true
 ownership_explicit = true
-
+```
 
 ---
 
 4. Query subsystem
 
 specs/query.toml
-
+```
 [subsystem]
 name = "query"
 crate = "themql-query"
@@ -300,7 +301,7 @@ response_transport = true
 
 [sse]
 stream_projection = true
-
+```
 This is where GraphQL becomes a projection, not the underlying ontology.
 
 
@@ -309,7 +310,7 @@ This is where GraphQL becomes a projection, not the underlying ontology.
 5. Cache subsystem
 
 specs/cache.toml
-
+```
 [subsystem]
 name = "cache"
 crate = "themql-cache"
@@ -351,7 +352,7 @@ no_duplicate_cache_semantics = true
 serialization_explicit = true
 ttl_explicit = true
 invalidation_explicit = true
-
+```
 TheMQL should not reinvent caching.
 
 It should orchestrate caches.
@@ -364,7 +365,7 @@ That distinction is worth putting in the constitution because otherwise six mont
 6. Transport subsystem
 
 specs/transport.toml
-
+```
 [subsystem]
 name = "transport"
 crate = "themql-transport"
@@ -395,7 +396,7 @@ graphql_to_sse = true
 
 [constraints]
 transport_specific_types_must_not_escape_adapter = true
-
+```
 That bridge section is important.
 
 You explicitly want:
@@ -416,7 +417,7 @@ One internal model.
 ---
 
 7. Runtime subsystem
-
+```
 [subsystem]
 name = "runtime"
 crate = "themql-runtime"
@@ -443,12 +444,12 @@ backpressure = true
 blocking_work_must_not_execute_on_async_executor = true
 cpu_bound_work_must_use_rayon_or_explicit_worker_pool = true
 unbounded_channels_forbidden = true
-
+```
 
 ---
 
 8. AI subsystem
-
+```
 [subsystem]
 name = "ai"
 crate = "themql-ai"
@@ -473,14 +474,14 @@ embedding_cacheable = true
 [constraints]
 ai_must_not_be_required_for_core_runtime = true
 model_provider_must_be_replaceable = true
-
+```
 AI is an optional capability, not a dependency that infects the message runtime like some kind of software fungus.
 
 
 ---
 
 9. Embedded subsystem
-
+```
 [subsystem]
 name = "embedded"
 crate = "themql-embedded"
@@ -500,7 +501,7 @@ blocking_operations_forbidden = true
 core_semantics_shared_with_host = true
 message_model_shared_with_host = true
 wire_format_shared_with_host = true
-
+```
 This is where the architecture starts getting genuinely interesting.
 
 The same conceptual message should be able to originate from:
