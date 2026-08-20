@@ -20,6 +20,7 @@ related = [
 
 [implementation]
 library = "tokio"
+http_library = "axum"
 role = "sse_stream_projection"
 desktop_only = true
 

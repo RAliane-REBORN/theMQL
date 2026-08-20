@@ -157,14 +157,16 @@ may need reassessment in Phase 1. `nalgebra` 0.35 is the canonical
 library for conventional numerical computation (EKF, covariance,
 quaternion); `ndarray` is retained only for raw ML-side array buffers.
 
-## Workspace layout (19 crates, 2 binaries)
+## Workspace layout (20 crates, 2 binaries)
 
-17 library crates + 2 binary crates, all under `crates/`:
+18 library crates + 2 binary crates, all under `crates/`:
 
-- **Core** (`themql-core`, `themql-message`, `themql-query`) — semantic
+- **Core** (`themql-core`, `themql-schema`, `themql-message`, `themql-query`) — semantic
   owners. `themql-core` is canonical for Message/Query/Response/Error/
-  Context/Resource types; `themql-message` and `themql-query` are
-  subordinate (routing, resolution, caching specialisation).
+  Context/Resource types; `themql-schema` is canonical for shared schema
+  types (FeatureSchema, NormalizationSpec, ModelFormat, TrainedModel);
+  `themql-message` and `themql-query` are subordinate (routing, resolution,
+  caching specialisation).
 - **Desktop-only** — `themql-desktop` (binary), `themql-analysis`,
   `themql-training`. Must not pull in embedded concerns.
 - **Embedded-only** — `themql-embedded` (binary), `themql-inference`,
@@ -178,16 +180,17 @@ quaternion); `ndarray` is retained only for raw ML-side array buffers.
 Cross-crate deps use `workspace = true` path deps declared in the root
 `Cargo.toml [workspace.dependencies]` (e.g. `themql-message.workspace = true`).
 
-## Repo state (v0.1, 2026-08-19)
+## Repo state (v0.1, 2026-08-20, Phase 2 Stages 1-11 complete)
 
-- Spec + workspace skeleton only. No real Rust source beyond two 1-line
-  binary `fn main(){}` stubs in `themql-desktop` / `themql-embedded`.
-- All 19 crate Cargo.tomls exist; 7 have real deps wired (core, storage,
-  graphql, mqtt, sse, artifact, + internal cross-crate refs).
-- `cargo check --workspace` passes; `cargo test` is trivial until Phase 1
-  adds real `src/`.
-- No CI, no `opencode.json`, no pre-commit hooks. Validation is the agent's
-  responsibility per the commands above.
+- 20 crates (18 libs + 2 binaries), all with real `src/` content.
+- 240 tests pass workspace-wide (default features).
+- Full validation green: `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny
+  check`, `cargo machete --with-metadata`, `scripts/ci_guard.py`.
+- `opencode.json` present with permissions + validate/safety-gate commands.
+- `tch-backend` feature in themql-training/themql-inference compiles
+  clean (`cargo check`); tests not run (libtorch C++ build needs more
+  RAM than this environment provides).
 - Changes are not committed unless the user explicitly asks.
 
 ## Forbidden implementation patterns (from prompts/IMPLEMENTER.md)

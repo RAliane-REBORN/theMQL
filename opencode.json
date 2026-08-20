@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "cargo *": "allow",
+      "python3 *": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git add*": "allow",
+      "git commit*": "allow",
+      "git push*": "allow",
+      "gh *": "allow",
+      "mkdir *": "allow",
+      "ls *": "allow",
+      "which *": "allow",
+      "free *": "allow",
+      "df *": "allow",
+      "du *": "allow",
+      "rm *": "ask",
+      "*": "ask"
+    }
+  },
+  "command": {
+    "validate": {
+      "description": "Run the full validation suite (fmt, clippy, test, deny, machete).",
+      "agent": "build",
+      "template": "Run the full validation suite for this repository. Use CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none for builds (7.8GB RAM, no swap). Run in order:\n1. cargo fmt --check\n2. cargo clippy --workspace --all-targets -- -D warnings\n3. CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test --workspace\n4. cargo deny check\n5. cargo machete --with-metadata\n6. python3 -c \"import tomllib,pathlib;[tomllib.loads(p.read_text()) for p in pathlib.Path('.').rglob('*.toml') if '.git' not in p.parts and 'target' not in p.parts]\"\n7. cargo metadata --no-deps --format-version 1 > /dev/null\nReport pass/fail for each step."
+    },
+    "safety-gate": {
+      "description": "Run the TETANUS safety-critical validation gate (deny, machete, bloat).",
+      "agent": "build",
+      "template": "Run the safety-critical validation gate for changes to themql-gnc, themql-estimation, themql-inference, or themql-artifact:\n1. cargo deny check\n2. cargo machete --with-metadata\n3. cargo bloat --release --crates -p themql-desktop\nReport pass/fail for each. These enforce the NASA JPL Power of Ten rules codified in TETANUS.md."
+    }
+  }
+}

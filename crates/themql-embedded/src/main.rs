@@ -233,7 +233,7 @@ impl SensorDriver for ImuDriver {
 /// prints a banner and returns. The real embassy main is a future task.
 #[allow(clippy::unnecessary_wraps)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("themql-embedded: stub");
+    println!("themql-embedded: stub — embassy runtime requires thumbv7em target");
     Ok(())
 }
 
@@ -297,5 +297,63 @@ mod tests {
         };
         assert_eq!(r.raw.len(), 32);
         assert_eq!(r.len, 0);
+    }
+
+    #[test]
+    fn gps_driver_construction() {
+        let d = GpsDriver::new(10);
+        assert_eq!(d.rate_hz, 10);
+        assert_eq!(d.kind(), SensorKind::Gps);
+    }
+
+    #[test]
+    fn baro_driver_construction() {
+        let d = BaroDriver::new(50);
+        assert_eq!(d.rate_hz, 50);
+        assert_eq!(d.kind(), SensorKind::Barometer);
+    }
+
+    #[test]
+    fn imu_driver_construction() {
+        let d = ImuDriver::new(200);
+        assert_eq!(d.rate_hz, 200);
+        assert_eq!(d.kind(), SensorKind::Imu);
+    }
+
+    #[test]
+    fn sensor_error_all_variants_distinct() {
+        assert_ne!(SensorError::BusError("a".to_owned()), SensorError::Timeout);
+        assert_ne!(SensorError::Timeout, SensorError::SensorNotResponding);
+        assert_ne!(
+            SensorError::SensorNotResponding,
+            SensorError::InvalidReading("b".to_owned())
+        );
+        assert_ne!(
+            SensorError::InvalidReading("b".to_owned()),
+            SensorError::CalibrationRequired
+        );
+    }
+
+    #[test]
+    fn sensor_driver_trait_object_dispatch() {
+        let mut drivers: [Box<dyn SensorDriver>; 3] = [
+            Box::new(GpsDriver::new(10)),
+            Box::new(BaroDriver::new(50)),
+            Box::new(ImuDriver::new(200)),
+        ];
+        for d in &mut drivers {
+            let reading = d.read().expect("driver read");
+            assert_eq!(reading.kind, d.kind());
+            assert_eq!(reading.raw.len(), 32);
+        }
+        assert_eq!(drivers[0].kind(), SensorKind::Gps);
+        assert_eq!(drivers[1].kind(), SensorKind::Barometer);
+        assert_eq!(drivers[2].kind(), SensorKind::Imu);
+    }
+
+    #[test]
+    fn sensor_error_is_std_error() {
+        fn assert_std_error<E: std::error::Error>() {}
+        assert_std_error::<SensorError>();
     }
 }

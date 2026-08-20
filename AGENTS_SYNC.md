@@ -19,6 +19,59 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 3 follow-ups)
+
+Phase 3 follow-ups (Workstreams A/B/C/D) executed by the lead opencode
+agent directly; no subagents were spawned. Workstream A (living-docs
+refresh + PR #4 merge + new branch) in progress.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 3 Stages 1-11 (all placeholder/stub implementations replaced with
+real backends across all 20 crates) were executed by the lead opencode
+agent directly; no subagents were spawned.
+
+### 2026-08-20 — no subagents this turn
+
+Phase 3 Stages 6 & 7 (real training loop in themql-training + real
+model loading/forward pass in themql-inference, both behind the
+`tch-backend` feature) were executed by the lead opencode agent
+directly; no subagents were spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 2 Stage 12 (final validation + commit + PR) was executed by the
+lead opencode agent directly; no subagents were spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 2 Stage 11 (safety-critical tooling + opencode.json + CI guard)
+was executed by the lead opencode agent directly; no subagents were
+spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 2 Stage 10 (cross-crate type reconciliation: CacheKey +
+themql-schema crate) was executed by the lead opencode agent directly;
+no subagents were spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 2 Stages 2-5 + 9 (transport adapters + analysis/training/inference
+heavy-dep wiring) were executed by the lead opencode agent directly; no
+subagents were spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 2 Stage 1 (themql-cache backends + themql-storage backend) was
+executed by the lead opencode agent directly; no subagents were
+spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 2 Stages 6-8 (themql-runtime, themql-desktop, themql-embedded) were
+executed by the lead opencode agent directly; no subagents were spawned.
+
 ### 2026-08-20 — opencode (glm-5.2:cloud) → 6 explore/general subagents
 
 - Subagent(s): 6 explore/general subagents this turn (1 spec audit + 5
@@ -154,3 +207,8 @@ Update after every turn (see `MEMORY.md` standing rules).
   `CHANGELOG.md`, `SESSION.md`, `AGENTS_SYNC.md`.
 - Conflicts / overlaps: none.
 - Follow-up: none (superseded by the Phase 1 complete turn above).
+
+## 2026-08-20
+
+- No subagents this turn. themql-sse Stage 8 implemented directly
+  (real broadcast channel + axum serve_sse + Last-Event-ID replay).

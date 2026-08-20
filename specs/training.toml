@@ -16,6 +16,7 @@ themql-artifact.
 [references]
 related = [
     "specs/model_artifact.toml",  # artifact emission
+    "specs/schema.toml",           # shared schema types (FeatureSchema, etc.)
     "specs/analysis.toml",         # dataset generation via polars
     "specs/telemetry.toml"        # training data source
 ]
@@ -103,6 +104,7 @@ struct FeatureSpec {
 enum FeatureDType { F32, F64, I64, Bool }
 enum NormalizationSpec { None, Standard, MinMax, Custom(String) }
 """
+implementation_note = "These types are implemented in themql-schema (specs/schema.toml) and re-exported by themql-training. This avoids a circular dependency between themql-training and themql-artifact."
 
 # ---------------------------------------------------------------------------
 # TrainingConfig

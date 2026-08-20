@@ -4,6 +4,452 @@ Handover notes for the next agent/session. Fold in-flight items from
 `SESSION.md` here when a session ends. Update after every turn (see
 `MEMORY.md` standing rules).
 
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 3 complete — all stubs replaced)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-12
+  complete. **Phase 3 Stages 1-11 complete**: all placeholder/stub
+  implementations replaced with real backends.
+- Branch: `feat/phase-2-heavy-dep-wiring` (PR #4 open, mergeable).
+- 305 tests pass workspace-wide (304 unit + 1 doc, default features).
+  20 crates, 20 specs.
+- Full validation green: `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace` (305),
+  `cargo deny check`, `cargo machete --with-metadata`,
+  `scripts/ci_guard.py`, `cargo metadata --no-deps`.
+- `tch-backend` feature compiles clean in themql-training/
+  themql-inference (tests not run: libtorch + RAM constraints).
+- No open bugs. BUG-0008 (flaky `helix_alias_works`) resolved — the
+  test is now stable after Phase 3 Stage 2 replaced the in-memory
+  HashMap with real sled-backed `SledStorage`.
+- Commit `828b373` pushed. Working tree clean (modulo in-flight
+  Workstream A doc-refresh).
+
+### What is done this turn
+
+Phase 3 replaced every remaining placeholder with a real backend:
+
+- **Stage 1 — themql-artifact**: real `blake3::hash` in `HashValidator`,
+  `FileArtifactLoader`, `BincodeArtifactWriter` (bincode round-trip).
+- **Stage 2 — themql-storage**: `SledStorage` (disk-backed sled),
+  `HelixStorage` alias, `ByPredicate` query support.
+- **Stage 3 — themql-cache**: L1 (`lru::LruCache`), L2
+  (`moka::sync::Cache`), L3 (`redis::Client`), key→subject index for
+  pattern invalidation, demotion on hit.
+- **Stage 4 — themql-estimation**: real quaternion EKF with Jacobian +
+  Joseph-form Kalman gain (`K = PHᵀ(HPHᵀ+R)⁻¹`,
+  `P = (I-KH)P(I-KH)ᵀ + KRKᵀ`), `SensorModel<M>` trait, `GpsModel`,
+  `BaroModel`, `BayesianEstimator`.
+- **Stage 5 — themql-analysis**: polars-backed types,
+  `StorageAnalysisPipeline`.
+- **Stage 6 — themql-training**: real `TchTrainer` (MLP + Adam + MSE +
+  TorchScript export) behind `tch-backend`.
+- **Stage 7 — themql-inference**: real `TchInferenceEngine` (CModule
+  load + `forward_ts` + deadline check + rollback) behind `tch-backend`.
+- **Stage 8 — themql-sse**: real broadcast + `serve_sse` (axum +
+  Last-Event-ID replay).
+- **Stage 9 — themql-mqtt**: `RumqttcTransport` + `RumqttcConfig`.
+- **Stage 10 — themql-graphql**: `GraphqlResolverBridgeImpl`,
+  `GraphqlSchemaImpl`, `serve_graphql` (axum HTTP/WS). Core
+  `Resolver`/`MessageHandler` made dyn-compatible.
+- **Stage 11 — validation**: all 7 gates green. Commit `828b373`.
+
+### What is NOT done (follow-ups, not blockers)
+
+- GraphQL `SubscriptionRoot.subscribe` emits a placeholder stream
+  (real themql-message stream wiring is Workstream B).
+- `themql-desktop` serve/analyze/train/validate/telemetry subcommands
+  print banners only (real impls are Workstream C).
+- `themql-embedded` main is a stub (embassy requires thumbv7em target).
+- `tch-backend` feature tests not run (libtorch + RAM).
+- No GitHub Actions CI workflow yet (Workstream D).
+- No transport-layer authn/authz policy (MQTT/GraphQL access control).
+- No fuzzing harness, no secret-management policy.
+- `mold` + `sccache` not installed (config ready in `.cargo/config.toml`).
+
+### Environment constraints
+
+- 7.8GB RAM, no swap. Use `CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none` for polars-dependent builds.
+- `tch-backend` feature compiles clean but tests are NOT run (libtorch
+  download + RAM).
+- Full workspace test takes ~15min with these settings.
+
+### Validation commands the next agent should run
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test --workspace
+cargo deny check
+cargo machete --with-metadata
+python3 scripts/ci_guard.py
+```
+
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-12
+  complete: cache/storage backends, transport adapters, runtime impls,
+  desktop/embedded binary wiring, analysis/training/inference heavy-dep
+  wiring, cross-crate type reconciliation, safety-critical tooling,
+  opencode.json, CI guard script.
+- Phase 3 Stages 6 & 7 complete: real training loop in
+  `themql-training` and real model loading + forward pass in
+  `themql-inference` (both behind the `tch-backend` feature).
+- Branch: `feat/phase-2-heavy-dep-wiring`.
+- `cargo test -p themql-training` (6 tests) and `cargo test -p
+  themql-inference` (6 tests) pass (default features). Workspace
+  `cargo check --workspace` green. 20 crates, 20 specs.
+- `cargo check -p themql-training --features tch-backend` and
+  `cargo check -p themql-inference --features tch-backend` compile
+  clean (tch-backend tests NOT run — libtorch C++ build needs more
+  RAM than this environment has, 7.8GB no swap).
+- `cargo fmt --check`, `cargo clippy` clean for all touched crates
+  (`themql-training`, `themql-inference`, `themql-analysis`,
+  `themql-artifact`).
+- Pre-existing flaky `themql-storage::helix_alias_works` sled temp
+  connection failure remains in the uncommitted working tree
+  (unrelated to Stages 6/7; surfaced during workspace `cargo test`).
+- BUG-0007 resolved (no open bugs).
+- Working tree has uncommitted changes from Phase 2 + Phase 3 stages
+  (commit only when explicitly asked).
+
+### What is done this turn
+
+- **Stage 6 — themql-training real training loop**: `TchTrainer::train`
+  now builds an MLP sized to `config.feature_schema`, trains with Adam
+  + MSE for `config.epochs` with optional early stopping, and exports
+  the trained network to `TorchScript` bytes via
+  `CModule::create_by_tracing` + `CModule::save` to a temp file. The
+  `Dataset` type re-exports the polars-backed
+  `themql_analysis::Dataset` (added `polars` + `themql-analysis` deps).
+- **Stage 7 — themql-inference real model loading + forward pass**:
+  `TchInferenceEngine::load()` runs `HashValidator::validate` and
+  rejects on errors, rejects empty bytes on every load, deserialises
+  the bytes into a `tch::CModule` pre-allocated at activation.
+  `infer()` runs the real forward pass, extracts the output to a 21-dim
+  `state_correction`, checks `inference_deadline_ms`, and populates
+  `confidence` from the output norm. `rollback()` reloads the previous
+  bytes into a fresh `CModule`.
+- **Pre-existing cleanup**: fixed clippy lints in `themql-analysis`
+  (doc backticks, unused import, cast precision, manual async) and
+  `themql-artifact` (redundant closures, similar_names) that blocked
+  the new clippy gates.
+
+### Validation commands the next agent should run
+
+```
+cargo fmt --check
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test \
+  -p themql-training -p themql-inference
+CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo check -p themql-training -p themql-inference \
+  --features tch-backend
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo clippy -p themql-training -p themql-inference \
+  -p themql-analysis -p themql-artifact --all-targets -- -D warnings
+```
+
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 3 Stage 10 complete)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-12
+  complete: cache/storage backends, transport adapters, runtime impls,
+  desktop/embedded binary wiring, analysis/training/inference heavy-dep
+  wiring, cross-crate type reconciliation, safety-critical tooling,
+  opencode.json, CI guard script.
+- Phase 3 Stage 10 complete: real GraphQL resolver bridge + axum HTTP/WS
+  integration in `themql-graphql`; core `Resolver`/`MessageHandler`
+  made dyn-compatible (boxed futures, `Send + Sync` supertraits,
+  `ResolverBoxed` blanket-impl adapter preserves `async fn` ergonomics).
+- Branch: `feat/phase-2-heavy-dep-wiring`.
+- 301 tests pass workspace-wide (default features). 20 crates, 20 specs.
+- `cargo fmt --check`, `cargo clippy` clean for all touched crates
+  (`themql-graphql`, `themql-core`, `themql-mqtt`). Workspace `cargo
+  test --workspace` green.
+- BUG-0007 resolved (no open bugs).
+- Commit `d97fcca` pushed to `feat/phase-2-heavy-dep-wiring`, PR #4 open.
+- Working tree clean.
+
+### What is done this turn
+
+- **Stage 12 — final validation + commit + PR**: ran full validation
+  suite (all 7 gates green), updated all 8 living docs for Stage 12
+  completion, committed all Phase 2 work as `d97fcca` (48 files, +6441/-
+  960), pushed to `feat/phase-2-heavy-dep-wiring`, created PR #4.
+- **Stage 11a — safety-critical tooling**: installed cargo-deny,
+  cargo-machete, cargo-bloat. `cargo deny check` passes (added BSL-1.0
+  + CDLA-Permissive-2.0 to deny.toml). `cargo machete` clean (removed
+  11 unused deps across 8 crates). `cargo bloat` passes (3.9MiB binary).
+  Removed conflicting cargo aliases from .cargo/config.toml.
+- **Stage 11b — opencode.json**: wrote project config with $schema,
+  instructions, permissions, and validate/safety-gate custom commands.
+- **Stage 11c — CI guard script**: wrote `scripts/ci_guard.py` checking
+  TOML parse + crate-name-vs-workspace invariant. All checks pass.
+
+### Validation commands the next agent should run
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test --workspace
+cargo deny check
+cargo machete --with-metadata
+python3 scripts/ci_guard.py
+```
+
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 2 Stage 10 complete)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-10
+  complete: cache/storage backends, transport adapters, runtime impls,
+  desktop/embedded binary wiring, analysis/training/inference heavy-dep
+  wiring, cross-crate type reconciliation.
+- Branch: `feat/phase-2-heavy-dep-wiring`.
+- 240 tests pass workspace-wide (default features). 20 crates, 20 specs.
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace` all green.
+- BUG-0007 resolved (no open bugs).
+- Working tree has uncommitted changes. The user has not requested
+  commits.
+
+### What is done this turn
+
+- **Stage 10a — CacheKey reconciliation**: `themql-cache` now re-exports
+  `CacheKey` from `themql-query` (per `specs/cache.toml`). Removed local
+  `CacheKey` definition + `blake3` dep. Added `hash_of()` + serde
+  derives to `themql-query::CacheKey`.
+- **Stage 10b — themql-schema crate**: created 20th crate with canonical
+  shared types matching `specs/training.toml` exactly. Fixed spec
+  deviations from `themql-artifact`: `FeatureDType` has `Bool` (not
+  `I32`), `NormalizationSpec` is simple enum (not struct variants),
+  `FeatureSchema` has `normalization` field. 6 tests.
+- **Stage 10c — updated dependent crates**: `themql-artifact`,
+  `themql-training`, `themql-inference` re-export from `themql-schema`.
+  Created `specs/schema.toml`. Updated spec references.
+
+### Environment constraints
+
+- Same as previous: 7.8GB RAM, no swap. Use
+  `CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none` for polars-dependent builds.
+- `tch-backend` feature compiles clean but tests not run (libtorch +
+  RAM).
+
+### Validation commands the next agent should run
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test --workspace
+```
+
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 2 Stages 2-5 + 9 complete)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 19 crates implemented). Phase 2 Stages 1-9
+  complete: cache/storage backends, transport adapters (SSE/MQTT/GraphQL),
+  runtime impls, desktop/embedded binary wiring, analysis/training/
+  inference heavy-dep wiring.
+- Branch: `feat/phase-2-heavy-dep-wiring`.
+- 234 tests pass workspace-wide (default features).
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace` all green.
+- BUG-0007 resolved (no open bugs).
+- Working tree has uncommitted changes. The user has not requested
+  commits.
+
+### What is done this turn
+
+- **Stage 2 — themql-sse**: added `SseEvent::to_wire_string()` (SSE
+  wire format), `SseEvent::from_message()` (Message→SseEvent),
+  `TokioSsePublisher` (broadcast channel-backed), `TokioSseStream`
+  (broadcast receiver → SSE event stream). Added `serde_json`,
+  `tokio` (rt/sync/io-util) to deps, `tokio` (macros/rt-multi-thread)
+  to dev-deps. 13 tests pass.
+- **Stage 3 — themql-mqtt**: added `subject_to_topic()` (identity
+  mapping per spec), `topic_to_subject()`, `encode_message()`
+  (Message→JSON bytes), `decode_message()` (JSON bytes→Message). Moved
+  `serde_json` from dev-dep to main deps. 14 tests pass.
+- **Stage 4-5 — themql-graphql**: added `#[Object]` impls for
+  `QueryRoot` and `MutationRoot` (placeholder fields).
+  `SubscriptionRoot` kept as marker only (no `#[Object]` —
+  `SubscriptionType` trait not implemented). Tests use
+  `async_graphql::EmptySubscription`. Added `tokio` (macros) to
+  dev-deps. 6 tests pass.
+- **Stage 9 — themql-analysis**: added `PolarsAnalysisResult`,
+  `PolarsDatasetBuilder` (constructs `DataFrame` from headers + rows),
+  `RayonAnalysisPipeline` (parallel null-count via `par_iter`). Added
+  `polars` and `rayon` to deps. 9 tests pass.
+- **Stage 9 — themql-training**: added `TchTrainer` implementing
+  `Trainer` behind `cfg(feature = "tch-backend")`. Added `tch`
+  (optional, `download-libtorch`) and `rayon` to deps; added
+  `[features] tch-backend = ["dep:tch"]`. 5 tests pass (default
+  features).
+- **Stage 9 — themql-inference**: added `TchInferenceEngine`
+  implementing `InferenceEngine` behind `cfg(feature = "tch-backend")`.
+  Added `tch` (optional, `download-libtorch`) to deps; added
+  `[features] tch-backend = ["dep:tch"]`. 6 tests pass (default
+  features).
+
+### Environment constraints
+
+- The `tch-backend` feature in themql-training/themql-inference
+  compiles clean but tests are NOT run in this environment. libtorch
+  download (~174MB) + 7.8GB RAM (no swap) make the full tch test build
+  impractical. polars-core alone OOM-kills rustc without
+  `CARGO_PROFILE_DEV_DEBUG=0`.
+- To build/test polars-dependent crates in this environment, use:
+  `CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test ...`
+- Full workspace test takes ~15min with these settings.
+
+### Stubs / follow-ups introduced this turn
+
+- `tch-backend` feature tests (`TchTrainer`, `TchInferenceEngine`)
+  require libtorch + more RAM to run.
+- Transport adapters (SSE/MQTT/GraphQL) are real but minimal — they
+  prove the trait surface compiles with the heavy deps; real network
+  I/O is a future task.
+- `RayonAnalysisPipeline` runs a trivial parallel null-count; real
+  analysis pipelines are a future task.
+- `TchTrainer` runs a placeholder training loop (tensor creation +
+  `tanh`); real training is a future task.
+- `TchInferenceEngine` runs a dummy forward pass; real model loading
+  is a future task.
+
+### Validation commands the next agent should run
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test --workspace
+```
+
+The `tch-backend` feature compiles clean:
+```
+cargo clippy -p themql-training -p themql-inference \
+  --features tch-backend --all-targets -- -D warnings
+```
+
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 2 Stages 6-8 complete)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 19 crates implemented). Phase 2 Stage 1
+  complete: themql-cache backends (L1/L2/L3 + TieredCache) and
+  themql-storage backend (HelixStorage in-memory) wired.
+- Branch: `feat/phase-2-heavy-dep-wiring`.
+- 59 tests pass across the two crates in scope (30 themql-cache + 29
+  themql-storage).
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all green for the two crates in scope.
+- Working tree has uncommitted changes. The user has not requested
+  commits.
+
+### What is done this turn
+
+- **themql-cache backends**: added `L1Cache` (bounded `HashMap` + FIFO
+  eviction — cachelito v0.16 API is macro/`'static`-singleton-based and
+  unsuitable for per-instance `CacheKey`-keyed L1, so the spec/`HashMap`
+  fallback was used per task brief), `L2Cache` (`moka::sync::Cache`),
+  `L3Cache` (`valkey` 0.0.0-alpha5 stub — driver lacks `DEL`/`EXPIRE`/
+  binary, ops return `TierUnavailable`), and `TieredCache<S: Storage>`
+  orchestrator implementing `Cache`: `get` walks L1→L2→L3→L4 promoting
+  on hit; `put` writes through; `invalidate` removes from all;
+  `invalidate_pattern` scans L1/L2 keys (best-effort). +14 tests, 30
+  total passing.
+- **themql-storage backend**: added `HelixStorage` implementing
+  `Storage` — in-memory `HashMap` fallback (helix-db v3.0 is async HTTP
+  for a live server, graph-DSL not KV); real adapter
+  FOLLOW-UP_REQUIRED. `query` supports `ByKey` + `BySubjectPattern`;
+  `ByPredicate` returns `QueryError`. +6 tests, 29 total passing.
+
+### Stubs / follow-ups introduced this turn
+
+- L1 cachelito integration deferred (v0.16 API mismatch).
+- L3 valkey integration deferred (alpha driver lacks required ops).
+- L4 helix-db integration deferred (requires live server + KV mapping).
+- `invalidate_pattern` against L1/L2 is effectively a no-op until a
+  key→subject index is added (`CacheKey` is an opaque BLAKE3 hash).
+
+### Validation commands the next agent should run
+
+- `cargo fmt -p themql-cache -p themql-storage --check`
+- `cargo clippy -p themql-cache -p themql-storage --all-targets -- -D warnings`
+- `cargo test -p themql-cache -p themql-storage`
+
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 2 Stages 6-8 complete)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 19 crates implemented). Phase 2 Stages 6-8
+  complete: runtime impls + desktop binary + embedded binary wired with
+  real deps (tokio, ratatui/crossterm) and real tests.
+- Branch: `feat/phase-2-heavy-dep-wiring`.
+- 29 default-feature tests + 8 desktop-feature runtime tests pass across
+  the three crates in scope (themql-runtime, themql-desktop,
+  themql-embedded).
+- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all green for the three crates, both with and without the
+  `desktop`/`embedded` feature flags.
+- **BLOCKER**: `cargo check --workspace` currently fails in
+  `themql-cache` and `themql-storage` due to **pre-existing uncommitted
+  changes** in those crates that were in the working tree before this
+  turn began (confirmed via `git stash`). Those are out of scope for
+  Stages 6-8 and not introduced by this turn. The next agent should fix
+  or revert those before running the workspace-wide gate.
+- Working tree has uncommitted changes (mine + the pre-existing
+  cache/storage ones). The user has not requested commits.
+
+### What is done this turn
+
+- **Stage 6 — themql-runtime**: verified `TokioRuntime` (desktop) and
+  `EmbassyRuntime` (embedded) both compile-check clean; added 8 real
+  `TokioRuntime` tests behind `cfg(feature = "desktop")` (spawn result,
+  sleep duration, timeout fires/succeeds, channel send/recv,
+  cancellation cancel-then-observe + already-cancelled-resolves, spawn
+  join error on panic). Added a `[dev-dependencies]` tokio with
+  `rt-multi-thread` + `test-util` + `macros` so the tests can build a
+  runtime. Clippy clean on both `--features desktop` and
+  `--features embedded`.
+- **Stage 7 — themql-desktop (binary)**: added tokio + ratatui deps;
+  rewrote `main.rs` with `#[tokio::main]`, clap CLI dispatch (per-command
+  banners), a real `tui_main()` using `ratatui::init`/`restore` +
+  crossterm event polling (quit on `q`/`Esc`), a 3-pane dashboard
+  (`draw_dashboard`: telemetry stream / state estimate / controller
+  state per `specs/desktop.toml [api.TuiLayout]`), and a `TestBackend`
+  unit test for the draw. 13 tests pass. ratatui 0.30 re-exports
+  crossterm via its default `crossterm` feature, so no separate
+  `crossterm` crate dep was needed.
+- **Stage 8 — themql-embedded (binary)**: the existing stub already had
+  `SensorKind`, `SensorError` (5 variants), `SensorDriver` trait,
+  `GpsDriver`/`BaroDriver`/`ImuDriver`. Updated the main stub banner to
+  "embassy runtime requires thumbv7em target"; added 6 more tests
+  (per-driver construction, all-variants-distinct, trait-object
+  dispatch, `SensorError: std::error::Error`). 10 tests pass. No embassy
+  added (won't compile on x86 host, per spec).
+
+### Stubs / follow-ups introduced this turn
+
+- `themql-embedded` main is a stub (`embassy runtime requires thumbv7em
+  target`). The real `#[embassy_executor::main]` is a future task per
+  `specs/embedded.toml [entry]`.
+- `themql-desktop` dispatch prints banners; real serve/analyze/train/
+  validate/telemetry implementations are future tasks. The TUI is real
+  (renders + handles quit keys) but panes are empty placeholders pending
+  telemetry wiring.
+
 ## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 1 complete)
 
 ### Repository state at handover
@@ -383,3 +829,13 @@ None. Awaiting user direction.
   themql-embedded`.
 - Whole workspace: fix `themql-mqtt` first, then `cargo check
   --workspace`.
+
+## 2026-08-20 — themql-sse Stage 8 complete
+
+- `themql-sse` now has real broadcast + `axum` SSE server with
+  Last-Event-ID replay. 17 tests green; clippy/fmt clean.
+- Validation: `cargo test -p themql-sse`,
+  `cargo clippy -p themql-sse --all-targets -- -D warnings`,
+  `cargo fmt -p themql-sse --check`, `cargo check --workspace`, TOML
+  sanity — all pass.
+- Next: remaining Phase 3 stages (other transport adapters / crates).

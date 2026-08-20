@@ -19,9 +19,9 @@ related = [
 ]
 
 [implementation]
-library = "helix-db"
-crate_registry_name = "helix-db"
-version = "3"
+library = "sled"
+crate_registry_name = "sled"
+version = "0.34"
 role = "authoritative_storage_and_l4_cache"
 
 [api]

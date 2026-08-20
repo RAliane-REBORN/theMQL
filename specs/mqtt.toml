@@ -23,6 +23,7 @@ library = "embassy"
 embedded_executor = "embassy-executor"
 synchronization = "embassy-sync"
 desktop_runtime = "tokio"
+desktop_client = "rumqttc"
 role = "mqtt_transport_projection"
 
 [topics]

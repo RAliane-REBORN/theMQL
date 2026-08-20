@@ -22,6 +22,8 @@ related = [
 library = "async-graphql"
 version = "8.0.0-rc.5"
 role = "graphql_projection_of_query_model"
+http_library = "axum"
+integration = "async-graphql-axum"
 
 [schema_generation]
 source = "themql-core types + themql-query Resolver trait"

@@ -1,0 +1,92 @@
+[subsystem]
+name = "schema"
+crate = "themql-schema"
+purpose = "Canonical shared schema types for training, artifact, and inference"
+
+[ownership]
+canonical_types = [
+    "ModelFormat",
+    "FeatureDType",
+    "FeatureSpec",
+    "FeatureSchema",
+    "NormalizationSpec",
+    "ValidationMetrics",
+    "TrainedModel",
+]
+re_exported_by = [
+    "themql-artifact",
+    "themql-training",
+    "themql-inference",
+]
+notes = """
+These types are defined canonically in specs/training.toml but live in a
+separate crate to avoid circular dependencies: themql-artifact depends on
+themql-schema, and themql-training depends on themql-artifact. Without
+themql-schema, placing the types in themql-training would require
+themql-artifact to depend on themql-training (circular).
+"""
+
+[api]
+public_types = [
+    "ModelFormat",
+    "FeatureDType",
+    "FeatureSpec",
+    "FeatureSchema",
+    "NormalizationSpec",
+    "ValidationMetrics",
+    "TrainedModel",
+]
+
+[api.ModelFormat]
+rust_type = """
+enum ModelFormat { TorchScript, SafeTensors, Onnx }
+"""
+serde = "snake_case"
+
+[api.FeatureDType]
+rust_type = """
+enum FeatureDType { F32, F64, I64, Bool }
+"""
+serde = "lowercase"
+
+[api.FeatureSpec]
+rust_type = """
+struct FeatureSpec {
+    pub name: String,
+    pub dtype: FeatureDType,
+    pub shape: Vec<usize>,
+}
+"""
+
+[api.NormalizationSpec]
+rust_type = """
+enum NormalizationSpec { None, Standard, MinMax, Custom(String) }
+"""
+serde = "snake_case"
+
+[api.FeatureSchema]
+rust_type = """
+struct FeatureSchema {
+    pub features: Vec<FeatureSpec>,
+    pub normalization: NormalizationSpec,
+}
+"""
+
+[api.ValidationMetrics]
+rust_type = """
+struct ValidationMetrics {
+    pub loss: f64,
+    pub accuracy: Option<f64>,
+    pub custom: BTreeMap<String, f64>,
+}
+"""
+
+[api.TrainedModel]
+rust_type = """
+struct TrainedModel {
+    pub model_bytes: Vec<u8>,
+    pub format: ModelFormat,
+    pub feature_schema: FeatureSchema,
+    pub validation_metrics: ValidationMetrics,
+}
+"""

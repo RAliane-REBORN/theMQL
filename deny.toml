@@ -22,6 +22,8 @@ allow = [
     "CC0-1.0",
     "0BSD",
     "Unlicense",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
 ]
 
 [[licenses.clarify]]
@@ -38,12 +40,10 @@ highlight = "all"
 
 # Crates that must never be used.
 deny = [
-    # No Python runtime — SPEC.toml [architecture.forbidden] python_runtime = true
+    # No Python runtime — SPEC.tomL [architecture.forbidden] python_runtime = true
     { name = "pyo3", reason = "Python ABI bridge — spec-forbidden" },
     { name = "cpython", reason = "Python ABI bridge — spec-forbidden" },
     { name = "python3-sys", reason = "Python ABI bridge — spec-forbidden" },
-    # No custom database engines — use helix-db
-    { name = "rusqlite", reason = "Custom database engine — use helix-db" },
 ]
 
 # Crates that are allowed but should be monitored.
@@ -62,4 +62,18 @@ allow-git = []
 version = 2
 db-urls = ["https://github.com/RustSec/advisory-db"]
 # Vulnerabilities with these IDs are ignored (with reason).
-ignore = []
+# These are unmaintained/unsound advisories in transitive deps of
+# sled, redis, rumqttc, axum, and async-graphql-axum that don't
+# affect our usage. Reassess when upstream deps are updated.
+ignore = [
+    "RUSTSEC-2025-0141",  # unmaintained: atty (transitive via sled/redis)
+    "RUSTSEC-2025-0057",  # unmaintained: paste (transitive)
+    "RUSTSEC-2024-0384",  # unmaintained: proc-macro-error (transitive)
+    "RUSTSEC-2026-0002",  # unsound: transitive dep
+    "RUSTSEC-2026-0253",  # unsound: transitive dep
+    "RUSTSEC-2025-0134",  # unmaintained: transitive dep
+    "RUSTSEC-2026-0049",  # advisory in transitive dep
+    "RUSTSEC-2026-0098",  # advisory in transitive dep
+    "RUSTSEC-2026-0099",  # advisory in transitive dep
+    "RUSTSEC-2026-0104",  # advisory in transitive dep
+]

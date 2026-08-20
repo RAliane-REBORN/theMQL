@@ -11,5 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+bincode.workspace = true
+blake3.workspace = true
 themql-core.workspace = true
+themql-schema.workspace = true
 thiserror.workspace = true

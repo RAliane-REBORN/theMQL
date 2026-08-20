@@ -9,77 +9,89 @@ standing rules). When a session ends, fold the in-flight items into
 - Date: 2026-08-20
 - Mode: build
 - Agent: opencode (glm-5.2:cloud)
-- Branch: `feat/phase-1-spec-deepening` (stacked on
-  `feat/v0.1-spec-and-workspace-skeleton`, PR #1 open)
+- Branch: `feat/phase-2-heavy-dep-wiring` (stacked on the Phase 1 work)
 
 ## Just-completed turn
 
-Phase 1 complete. Three stages:
+Phase 3 Stages 1-11 complete: all placeholder/stub implementations
+replaced with real backends across all 20 crates. Commit `828b373`
+pushed to `feat/phase-2-heavy-dep-wiring`, PR #4 open.
 
-1. **nalgebra amendment** — nalgebra 0.35 replaces ndarray for non-ML
-   numerics (EKF, covariance, quaternion, rotation, linear algebra).
-   ndarray demoted to raw ML-side buffers only. Updated SYSTEM.md,
-   ARCHITECT.md, SPEC.toml, Cargo.toml, AGENTS.md, MEMORY.md.
-2. **Stage 1 — spec deepening** — deepened ALL 19 specs from thin/medium
-   to deep with concrete types/traits/signatures. User decisions applied:
-   Selection = filter + projection combined (core.toml); TWO separate
-   runtime traits DesktopRuntime + EmbeddedRuntime, no shared trait
-   (runtime.toml); EstimatorState = 21-dim (state_estimation.toml).
-3. **Stage 2 — all 19 crates implemented** — each crate now has real Rust
-   types/traits + unit tests. See CHANGELOG.md 2026-08-20 for the per-crate
-   breakdown.
-
-Files touched this turn: prompts/SYSTEM.md, prompts/ARCHITECT.md,
-SPEC.toml, Cargo.toml, AGENTS.md, all 19 specs/*.toml, all 19
-crates/themql-*/{Cargo.toml,src/*}, + 8 living docs.
+1. **themql-artifact (Stage 1)**: real BLAKE3 `HashValidator`,
+   `FileArtifactLoader`, `BincodeArtifactWriter` (bincode round-trip).
+   22 tests.
+2. **themql-storage (Stage 2)**: `SledStorage` (disk-backed sled),
+   `HelixStorage` alias, `ByPredicate` query support. 31 tests.
+3. **themql-cache (Stage 3)**: L1 (`lru::LruCache`), L2 (`moka::sync::Cache`),
+   L3 (`redis::Client`), key→subject index for pattern invalidation,
+   demotion on hit. 32 tests.
+4. **themql-estimation (Stage 4)**: real quaternion EKF with Jacobian +
+   Joseph-form Kalman gain (`K = PHᵀ(HPHᵀ+R)⁻¹`,
+   `P = (I-KH)P(I-KH)ᵀ + KRKᵀ`), `SensorModel<M>` trait, `GpsModel`,
+   `BaroModel`, `BayesianEstimator`. 24 tests.
+5. **themql-analysis (Stage 5)**: polars-backed types,
+   `StorageAnalysisPipeline`. 12 tests.
+6. **themql-training (Stage 6)**: real `TchTrainer` (MLP + Adam + MSE +
+   TorchScript export) behind `tch-backend`. 6 default tests.
+7. **themql-inference (Stage 7)**: real `TchInferenceEngine` (CModule
+   load + `forward_ts` + deadline check + rollback) behind `tch-backend`.
+   6 default tests.
+8. **themql-sse (Stage 8)**: real broadcast + `serve_sse` (axum +
+   Last-Event-ID replay). 17 tests.
+9. **themql-mqtt (Stage 9)**: `RumqttcTransport` + `RumqttcConfig`.
+   25 tests.
+10. **themql-graphql (Stage 10)**: `GraphqlResolverBridgeImpl`,
+    `GraphqlSchemaImpl`, `serve_graphql` (axum HTTP/WS). Core
+    `Resolver`/`MessageHandler` made dyn-compatible. 13 tests.
+11. **Stage 11 (validation)**: all 7 gates green. Commit `828b373`.
 
 ## State of the repository
 
-- v0.1 spec + workspace skeleton + toolchain hardening + Phase 1 complete.
-- ALL 19 crates now have real `src/` content (traits + types + error types +
-  unit tests). No 0-line stubs remain.
-- 183 unit tests + 1 doc test = 184 tests, all pass.
-- Full validation green:
-  - `cargo fmt --all --check` — clean.
-  - `cargo check --workspace` — passes for all 19 crates.
-  - `cargo clippy --workspace --all-targets -- -D warnings` — zero warnings.
-  - `cargo test --workspace` — 184 tests pass.
-  - `python3 tomllib` — all TOML files parse.
-  - `cargo metadata --no-deps` — resolves.
-- The four safety-critical crates (gnc, estimation, inference, artifact)
-  comply with TETANUS.md (forbid(unsafe_code), deny(warnings),
-  clippy::pedantic, no recursion, fixed loop bounds, no heap alloc after
-  init where required, functions <= 60 lines, >= 2 assertions per function,
-  no unwrap()/expect() in non-test code). nalgebra 0.35 used for all non-ML
-  numerics. `tch` deliberately not added to inference (libtorch build dep);
-  the InferenceEngine trait is defined without it.
-- New workspace deps added: nalgebra 0.35, uuid 1 (v7+serde), blake3 1,
-  thiserror 2, serde-big-array 0.5.
-- Working tree has uncommitted changes. Not yet committed.
+- Phase 1 complete (spec + 20 crates implemented).
+- Phase 2 Stages 1-12 complete.
+- Phase 3 Stages 1-11 complete: all placeholders replaced with real
+  backends. 305 tests pass workspace-wide (304 unit + 1 doc, default
+  features). 20 crates, 20 specs.
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace`, `cargo deny check`,
+  `cargo machete --with-metadata`, `scripts/ci_guard.py` — all green.
+- `tch-backend` feature compiles clean in both `themql-training` and
+  `themql-inference` (tests not run: libtorch OOM).
+- No open bugs (BUG-0008 resolved — the flaky sled temp test is now
+  stable after Phase 3 Stage 2 replaced the in-memory HashMap with
+  real sled-backed SledStorage).
 
 ## In-flight work
 
-None. Phase 1 is complete.
+Phase 3 follow-ups (user-requested, starting now):
+
+- Workstream A: refresh living docs + merge PR #4 to main + create
+  `feat/phase-3-followups` branch. **In progress.**
+- Workstream B: wire real GraphQL subscriptions from themql-sse into
+  `SubscriptionRoot.subscribe`.
+- Workstream D: create GitHub Actions CI workflow.
+- Workstream C: implement all 5 themql-desktop subcommands
+  (serve/analyze/train/validate/telemetry).
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. Commit the work (user has not requested commits yet).
-2. Implement full nonlinear quaternion EKF dynamics + Jacobian-based
-   Kalman gain in themql-estimation (v0.1 uses simplified identity-gain
-   updates as a placeholder).
-3. Wire a real SHA-256 (or BLAKE3) into themql-artifact's HashValidator
-   (v0.1 uses a placeholder fold hash — must replace before deployment).
-4. Add a real `tch`-backed `InferenceEngine` impl in themql-inference once
-   libtorch is available in the build env.
-5. Reconcile CacheKey (defined locally in themql-cache) with themql-query's
-   CacheKeyer — do not duplicate the key type silently.
-6. Wire heavy deps (tch, polars, dioxus, ratatui, embassy) into the
-   training/analysis/desktop/embedded crates behind the trait surfaces.
-7. Install cargo-deny, cargo-machete, cargo-bloat, sccache, mold; run the
-   safety-critical validation gate.
-8. Add a CI guard script (TOML parse + crate-name-vs-workspace invariant).
-9. Write `opencode.json`.
+1. (in progress) Workstream A → B → D → C.
+2. Run `tch-backend` feature tests once a beefier environment is
+   available (>7.8GB RAM).
+3. Real `themql-embedded` embassy main (requires thumbv7em target).
+4. Transport-layer authn/authz policy (MQTT broker credentials, GraphQL
+   access control).
 
 ## Open questions / blockers
 
-None. Awaiting user direction.
+None.
+## 2026-08-20 — themql-sse real implementation (Stage 8)
+
+Rewrote `crates/themql-sse/src/lib.rs` to flow real `SseEvent`s through
+the broadcast channel and added an `axum`-backed `serve_sse` HTTP
+server with `Last-Event-ID` replay. 17 tests pass; clippy pedantic +
+`#![deny(warnings)]` + fmt clean. Added `futures-util` workspace dep.
+Workspace `cargo check` green. No issues.
+
+### Open questions / blockers
+None.
