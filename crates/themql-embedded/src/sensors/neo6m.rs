@@ -66,9 +66,7 @@ impl<R: Read> Neo6m<R> {
                 if validate_checksum(sentence) {
                     return Ok(sentence);
                 }
-                return Err(SensorError::InvalidReading(
-                    heap_string("checksum"),
-                ));
+                return Err(SensorError::InvalidReading(heap_string("checksum")));
             }
         }
     }

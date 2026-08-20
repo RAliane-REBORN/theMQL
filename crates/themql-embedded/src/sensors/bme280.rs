@@ -219,8 +219,8 @@ impl<I: I2c> Bme280<I> {
         let var2 = ((var1 * var1) >> 11) * (i64::from(c.p6));
         let var2 = var2 + ((var1 * i64::from(c.p5)) << 1);
         let var2 = (var2 >> 2) + (i64::from(c.p4) << 16);
-        let var1 = ((i64::from(c.p3) * ((var1 * var1) >> 13)) >> 3)
-            + ((i64::from(c.p2) * var1) >> 1);
+        let var1 =
+            ((i64::from(c.p3) * ((var1 * var1) >> 13)) >> 3) + ((i64::from(c.p2) * var1) >> 1);
         let var1 = var1 >> 18;
         let var1 = ((32768 + var1) * i64::from(c.p1)) >> 15;
         if var1 == 0 {
@@ -240,9 +240,8 @@ impl<I: I2c> Bme280<I> {
         let c = &self.calib;
         let tf = self.t_fine as i64;
         let h = tf - 76800;
-        let h_x1 = ((raw as i64) << 14) - (i64::from(c.h4) << 20)
-            - (i64::from(c.h5) * h)
-            + (16384 >> 2);
+        let h_x1 =
+            ((raw as i64) << 14) - (i64::from(c.h4) << 20) - (i64::from(c.h5) * h) + (16384 >> 2);
         let h_x2 = (h_x1 * i64::from(c.h6)) >> 10;
         let h_x3 = (h_x2 * i64::from(c.h3)) >> 11;
         if h_x3 < 0 {
@@ -304,8 +303,24 @@ fn parse_calibration(buf1: &[u8; 26], buf2: &[u8; 9]) -> Bme280Calib {
     let h5 = ((i16::from(buf2[5])) << 4) | (i16::from(buf2[4] >> 4));
     let h6 = i8::from_le_bytes([buf2[6]]);
     Bme280Calib {
-        t1, t2, t3, p1, p2, p3, p4, p5, p6, p7, p8, p9,
-        h1, h2, h3, h4, h5, h6,
+        t1,
+        t2,
+        t3,
+        p1,
+        p2,
+        p3,
+        p4,
+        p5,
+        p6,
+        p7,
+        p8,
+        p9,
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6,
     }
 }
 
@@ -341,15 +356,9 @@ mod tests {
     #[test]
     fn pack_reading_round_trips_4_byte_fields() {
         let r = pack_reading(2512, 101325, 4500);
-        let temp = i32::from_le_bytes([
-            r.raw[0], r.raw[1], r.raw[2], r.raw[3],
-        ]);
-        let press = i32::from_le_bytes([
-            r.raw[4], r.raw[5], r.raw[6], r.raw[7],
-        ]);
-        let hum = i32::from_le_bytes([
-            r.raw[8], r.raw[9], r.raw[10], r.raw[11],
-        ]);
+        let temp = i32::from_le_bytes([r.raw[0], r.raw[1], r.raw[2], r.raw[3]]);
+        let press = i32::from_le_bytes([r.raw[4], r.raw[5], r.raw[6], r.raw[7]]);
+        let hum = i32::from_le_bytes([r.raw[8], r.raw[9], r.raw[10], r.raw[11]]);
         assert_eq!(temp, 2512);
         assert_eq!(press, 101325);
         assert_eq!(hum, 4500);

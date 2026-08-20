@@ -15,17 +15,20 @@ embassy-time.workspace = true
 cortex-m-rt.workspace = true
 embedded-alloc.workspace = true
 static_cell.workspace = true
+minimq.workspace = true
+embedded-io-async.workspace = true
 themql-gnc = { path = "../themql-gnc", default-features = false }
 themql-estimation = { path = "../themql-estimation", default-features = false }
 nalgebra = { version = "0.35", default-features = false, features = ["libm"] }
 
 [dependencies]
-embedded-hal = "1.0"
-embedded-hal-async = "1.0"
-embedded-io-async = "0.7"
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embedded-io-async.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+minimq.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["cortex-m-rt"]

@@ -35,6 +35,7 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_precision_loss)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::needless_pass_by_value)]
@@ -44,6 +45,7 @@
 #[cfg(target_os = "none")]
 extern crate alloc;
 
+pub mod mqtt;
 pub mod sensors;
 
 // ---------------------------------------------------------------------------
@@ -435,7 +437,7 @@ mod embedded {
     pub async fn gps_task(mut driver: GpsDriver) {
         let period = Duration::from_hz(GPS_RATE_HZ as u64);
         loop {
-            if let Ok(reading) = driver.read() {
+            if let Ok(reading) = driver.read().await {
                 let _ = GPS_CHAN.try_send(TaggedReading {
                     kind: SensorKind::Gps,
                     reading,
@@ -450,7 +452,7 @@ mod embedded {
     pub async fn baro_task(mut driver: BaroDriver) {
         let period = Duration::from_hz(BARO_RATE_HZ as u64);
         loop {
-            if let Ok(reading) = driver.read() {
+            if let Ok(reading) = driver.read().await {
                 let _ = BARO_CHAN.try_send(TaggedReading {
                     kind: SensorKind::Barometer,
                     reading,
@@ -465,7 +467,7 @@ mod embedded {
     pub async fn imu_task(mut driver: ImuDriver) {
         let period = Duration::from_hz(IMU_RATE_HZ as u64);
         loop {
-            if let Ok(reading) = driver.read() {
+            if let Ok(reading) = driver.read().await {
                 let _ = IMU_CHAN.try_send(TaggedReading {
                     kind: SensorKind::Imu,
                     reading,
@@ -545,15 +547,29 @@ mod embedded {
     }
 
     /// Telemetry task. Publishes at 10 Hz to the four subjects defined
-    /// in [`TELEMETRY_SUBJECTS`]. In the full implementation this
-    /// publishes `TelemetryMessage` via MQTT. In this stage it counts
-    /// publish cycles.
+    /// in [`TELEMETRY_SUBJECTS`]. Formats telemetry payloads as JSON
+    /// via [`crate::mqtt::format_state_estimate`] and
+    /// [`crate::mqtt::format_diagnostics`]. When a minimq transport
+    /// handle is available (passed in via a channel or static), the
+    /// payloads are published via MQTT v5. In this stage the payloads
+    /// are formatted and counted; the actual publish requires an
+    /// `embassy-net` TCP transport wired at init.
     #[embassy_executor::task]
     pub async fn telemetry_task() {
         let period = Duration::from_hz(TELEMETRY_RATE_HZ as u64);
         let mut publish_count: u32 = 0;
+        let mut error_count: u32 = 0;
+        let mut payload_buf = [0u8; crate::mqtt::PAYLOAD_BUF_SIZE];
         loop {
             publish_count = publish_count.wrapping_add(1);
+            let len = crate::mqtt::format_state_estimate(&mut payload_buf, [0.0; 3], [0.0; 3]);
+            if len == 0 {
+                error_count = error_count.wrapping_add(1);
+            }
+            let len = crate::mqtt::format_diagnostics(&mut payload_buf, publish_count, error_count);
+            if len == 0 {
+                error_count = error_count.wrapping_add(1);
+            }
             Timer::after(period).await;
         }
     }

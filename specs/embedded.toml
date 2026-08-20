@@ -41,7 +41,7 @@ trait = "EmbeddedRuntime"
 
 [mqtt]
 enabled = true
-implementation = "embassy"
+implementation = "minimq 0.13 (MQTT v5, no_std, async, embedded-io-async + embassy-time)"
 
 # ---------------------------------------------------------------------------
 # Sensors — canonical
