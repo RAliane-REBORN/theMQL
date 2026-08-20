@@ -19,6 +19,20 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 7 doc + spec-deviation cleanup)
+
+Phase 7 (first phase of the 7-phase sweep on
+`feat/phase-7-13-comprehensive`) executed by the lead opencode agent
+directly; no subagents were spawned. All 2 sub-steps complete: (7.1)
+refreshed stale HANDOVER/BUGS/MEMORY/SECURITY docs to actual Phase
+6-complete state and documented remaining gaps as Phase 8-13 scope;
+(7.2) fixed 3 spec deviations in safety-critical crates
+(`RollbackHandle.previous_model: TrainedModel`,
+`InferenceError::ArtifactInvalid(ArtifactError)`,
+`InferenceError::BudgetExceeded { used, limit: ResourceBudget }`,
+`TrainingError::ArtifactEmissionFailed(ArtifactError)`). 12 tests pass
+in the two affected crates.
+
 ### 2026-08-20 — no subagents this turn (Rust 1.98.0 toolchain drift fix)
 
 Toolchain-compatibility fix executed by the lead opencode agent

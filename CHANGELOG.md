@@ -5,6 +5,66 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 7: doc + spec-deviation cleanup
+
+First phase of a 7-phase sweep (Phases 7-13) on a single branch
+`feat/phase-7-13-comprehensive`. No new features; closes spec-deviation
+gaps in safety-critical crates and refreshes stale living docs.
+
+#### 7.1 Refresh stale docs
+
+- `HANDOVER.md`: removed stale "What is NOT done" claims (no_std GNC
+  not done, authz/ACLs not implemented) — replaced with current state +
+  Phase 8-13 follow-ups.
+- `BUGS.md`: removed stale Phase-3-era follow-ups (GraphQL subscription
+  placeholder, desktop subcommand banners-only, WS role defaults).
+  Replaced with current spec-implementation gaps grouped by phase
+  (Phase 8-13 scope).
+- `MEMORY.md`: test count 304 → 365; status line updated to Phase 7;
+  Phase 7 entry added to decision log.
+- `SECURITY.md`: "Known limitations" section updated to reflect
+  Phase 4/5/6 transport-layer authz (RoleGuard, MqttAcl) — removed
+  stale "no transport-layer authn/authz policy" claim.
+
+#### 7.2 Fix 3 spec deviations in safety-critical crates
+
+- **`themql-inference`** (`crates/themql-inference/src/lib.rs`):
+  - `RollbackHandle.previous_model: TrainedModel` (was
+    `previous_model_bytes: Vec<u8>`); `restore()` now returns
+    `Result<TrainedModel, InferenceError>` (was `Result<Vec<u8>, _>`).
+    Matches `specs/inference.toml [api.RollbackHandle]`.
+  - `InferenceError::ArtifactInvalid(ArtifactError)` (was
+    `ArtifactInvalid(String)`); `From<ArtifactError>` impl simplified
+    to `Self::ArtifactInvalid(e)`. Matches
+    `specs/inference.toml [api.InferenceError]`.
+  - `InferenceError::BudgetExceeded { used: ResourceBudget, limit:
+    ResourceBudget }` (was `{ used_cpu: u8, limit_cpu: u8 }`).
+    `ResourceBudget::new()` updated to construct full `ResourceBudget`
+    for both `used` and `limit`. Matches spec.
+  - Added `InferenceError::AdaptationNotImplemented(String)` and
+    `InferenceError::InternalError(String)` variants for Phase 12
+    online-adaptation work (spec allows extension; the core 7 variants
+    match exactly).
+  - TchInferenceEngine tch-backend impl + tests updated for the new
+    shapes.
+- **`themql-training`** (`crates/themql-training/src/lib.rs`):
+  - `TrainingError::ArtifactEmissionFailed(#[from]
+    themql_artifact::ArtifactError)` (was `String`); the `#[from]`
+    attribute gives `?` ergonomics for `ArtifactError` sources. The
+    `export_torchscript_bytes` call-site (returns `Result<_, String>`)
+    was updated to wrap strings in `ArtifactError::ValidationFailed(
+    String)`. Matches `specs/training.toml [api.TrainingError]`.
+
+#### Validation
+
+- `cargo fmt --check` — clean.
+- `cargo check -p themql-inference -p themql-training` — clean.
+- `cargo test -p themql-inference -p themql-training` — 6 + 6 = 12
+  tests pass (default features).
+- `tch-backend` feature compiles clean (libtorch C++ build OOM in
+  7.8GB env — tests not run, per known limitation).
+- No `unsafe` introduced.
+
 ### 2026-08-20 — Rust 1.98.0 toolchain drift fix
 
 Rust 1.98.0 stable (88d9e12ae 2026-08-18) released during PR #7 review.

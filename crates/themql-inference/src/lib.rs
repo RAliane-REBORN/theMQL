@@ -63,8 +63,18 @@ impl ResourceBudget {
     ) -> Result<Self, InferenceError> {
         if cpu_budget_pct > 100 {
             return Err(InferenceError::BudgetExceeded {
-                used_cpu: cpu_budget_pct,
-                limit_cpu: 100,
+                used: ResourceBudget {
+                    cpu_budget_pct,
+                    memory_budget_bytes,
+                    inference_deadline_ms,
+                    adaptation_deadline_ms,
+                },
+                limit: ResourceBudget {
+                    cpu_budget_pct: 100,
+                    memory_budget_bytes,
+                    inference_deadline_ms,
+                    adaptation_deadline_ms,
+                },
             });
         }
         Ok(Self {
@@ -82,33 +92,32 @@ impl ResourceBudget {
 
 /// Handle to the previous (last-known-good) model. On activation failure
 /// or budget overrun, the runtime restores the previous model via this
-/// handle. The handle owns the previous model's bytes — no copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// handle. The handle owns the previous model — no copy.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RollbackHandle {
     /// Previous model id.
     pub previous_model_id: String,
-    /// Previous model raw bytes.
-    pub previous_model_bytes: Vec<u8>,
+    /// Previous model (opaque bytes + metadata).
+    pub previous_model: TrainedModel,
 }
 
 impl RollbackHandle {
     /// Construct a rollback handle.
     #[must_use]
-    pub fn new(previous_model_id: String, previous_model_bytes: Vec<u8>) -> Self {
+    pub fn new(previous_model_id: String, previous_model: TrainedModel) -> Self {
         Self {
             previous_model_id,
-            previous_model_bytes,
+            previous_model,
         }
     }
 
-    /// Consume the handle and return the previous model bytes for
-    /// restoration.
+    /// Consume the handle and return the previous model for restoration.
     ///
     /// # Errors
-    /// Returns [`InferenceError::RollbackFailed`] if the bytes are empty
-    /// (no previous model was retained).
-    pub fn restore(self) -> Result<Vec<u8>, InferenceError> {
-        if self.previous_model_bytes.is_empty() {
+    /// Returns [`InferenceError::RollbackFailed`] if the model bytes are
+    /// empty (no previous model was retained).
+    pub fn restore(self) -> Result<TrainedModel, InferenceError> {
+        if self.previous_model.model_bytes.is_empty() {
             return Err(InferenceError::RollbackFailed(
                 "no previous model bytes retained".to_string(),
             ));
@@ -118,7 +127,7 @@ impl RollbackHandle {
                 "previous model id missing".to_string(),
             ));
         }
-        Ok(self.previous_model_bytes)
+        Ok(self.previous_model)
     }
 }
 
@@ -159,14 +168,14 @@ pub struct InferenceOutput {
 pub enum InferenceError {
     /// The provided artifact was invalid.
     #[error("artifact invalid: {0}")]
-    ArtifactInvalid(String),
+    ArtifactInvalid(ArtifactError),
     /// Resource budget was exceeded.
-    #[error("budget exceeded: used_cpu {used_cpu} > limit_cpu {limit_cpu}")]
+    #[error("budget exceeded: used {used:?} > limit {limit:?}")]
     BudgetExceeded {
-        /// CPU pct used.
-        used_cpu: u8,
-        /// CPU pct limit.
-        limit_cpu: u8,
+        /// Actual usage.
+        used: ResourceBudget,
+        /// Enforced limit.
+        limit: ResourceBudget,
     },
     /// Inference deadline was exceeded.
     #[error("deadline exceeded: deadline_ms {deadline_ms}, actual_ms {actual_ms}")]
@@ -193,6 +202,12 @@ pub enum InferenceError {
         /// Actual schema description.
         got: String,
     },
+    /// Online adaptation is not implemented in this engine.
+    #[error("online adaptation not implemented: {0}")]
+    AdaptationNotImplemented(String),
+    /// Internal inference failure not covered by other variants.
+    #[error("internal error: {0}")]
+    InternalError(String),
 }
 
 impl From<InferenceError> for themql_core::Error {
@@ -203,7 +218,7 @@ impl From<InferenceError> for themql_core::Error {
 
 impl From<ArtifactError> for InferenceError {
     fn from(e: ArtifactError) -> Self {
-        Self::ArtifactInvalid(e.to_string())
+        Self::ArtifactInvalid(e)
     }
 }
 
@@ -286,7 +301,7 @@ impl InferenceEngine for TchInferenceEngine {
     fn load(&mut self, artifact: ModelArtifact) -> Result<ActivationHandle, InferenceError> {
         if artifact.model_bytes.is_empty() {
             return Err(InferenceError::ArtifactInvalid(
-                "empty model bytes".to_string(),
+                ArtifactError::ValidationFailed("empty model bytes".to_string()),
             ));
         }
         let validator = themql_artifact::HashValidator::new();
@@ -300,11 +315,14 @@ impl InferenceEngine for TchInferenceEngine {
                 .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(InferenceError::ArtifactInvalid(msg));
+            return Err(InferenceError::ArtifactInvalid(
+                ArtifactError::ValidationFailed(msg),
+            ));
         }
         let mut cursor = std::io::Cursor::new(&artifact.model_bytes);
-        let cmodule = tch::CModule::load_data(&mut cursor)
-            .map_err(|e| InferenceError::ArtifactInvalid(e.to_string()))?;
+        let cmodule = tch::CModule::load_data(&mut cursor).map_err(|e| {
+            InferenceError::ArtifactInvalid(ArtifactError::ValidationFailed(e.to_string()))
+        })?;
         let model_id = artifact.metadata.model_id.clone();
         if let Some(prev) = self.active.take() {
             self.previous = Some(prev);
@@ -322,7 +340,7 @@ impl InferenceEngine for TchInferenceEngine {
         let module = self.module.as_ref().ok_or(InferenceError::ModelNotLoaded)?;
         if active.model_bytes.is_empty() {
             return Err(InferenceError::ArtifactInvalid(
-                "empty model bytes on active artifact".to_string(),
+                ArtifactError::ValidationFailed("empty model bytes on active artifact".to_string()),
             ));
         }
         let state_slice: &[f64] = input.state.as_slice();
@@ -372,11 +390,11 @@ impl InferenceEngine for TchInferenceEngine {
     }
 
     fn rollback(&mut self, handle: RollbackHandle) -> Result<(), InferenceError> {
-        let bytes = handle.restore()?;
+        let model = handle.restore()?;
         let prev = self.previous.take().ok_or_else(|| {
             InferenceError::RollbackFailed("no previous model retained".to_string())
         })?;
-        let mut cursor = std::io::Cursor::new(&bytes);
+        let mut cursor = std::io::Cursor::new(&model.model_bytes);
         let cmodule = tch::CModule::load_data(&mut cursor)
             .map_err(|e| InferenceError::RollbackFailed(e.to_string()))?;
         self.module = Some(cmodule);
@@ -424,21 +442,64 @@ mod tests {
     }
 
     #[test]
-    fn rollback_handle_restore_returns_bytes() {
-        let h = RollbackHandle::new("m-1".to_string(), vec![1, 2, 3]);
-        let bytes = h.restore().expect("restore");
-        assert_eq!(bytes, vec![1, 2, 3]);
+    fn rollback_handle_restore_returns_model() {
+        let model = themql_schema::TrainedModel {
+            model_bytes: vec![1, 2, 3],
+            format: themql_schema::ModelFormat::TorchScript,
+            feature_schema: themql_schema::FeatureSchema {
+                features: vec![themql_schema::FeatureSpec {
+                    name: "state".to_string(),
+                    dtype: themql_schema::FeatureDType::F32,
+                    shape: vec![21],
+                }],
+                normalization: themql_schema::NormalizationSpec::None,
+            },
+            validation_metrics: themql_schema::ValidationMetrics {
+                loss: 0.0,
+                accuracy: None,
+                custom: std::collections::BTreeMap::new(),
+            },
+        };
+        let h = RollbackHandle::new("m-1".to_string(), model.clone());
+        let restored = h.restore().expect("restore");
+        assert_eq!(restored, model);
     }
 
     #[test]
-    fn rollback_handle_restore_rejects_empty() {
-        let h = RollbackHandle::new("m-1".to_string(), Vec::new());
+    fn rollback_handle_restore_rejects_empty_bytes() {
+        let model = themql_schema::TrainedModel {
+            model_bytes: Vec::new(),
+            format: themql_schema::ModelFormat::TorchScript,
+            feature_schema: themql_schema::FeatureSchema {
+                features: vec![],
+                normalization: themql_schema::NormalizationSpec::None,
+            },
+            validation_metrics: themql_schema::ValidationMetrics {
+                loss: 0.0,
+                accuracy: None,
+                custom: std::collections::BTreeMap::new(),
+            },
+        };
+        let h = RollbackHandle::new("m-1".to_string(), model);
         assert!(h.restore().is_err());
     }
 
     #[test]
     fn rollback_handle_restore_rejects_missing_id() {
-        let h = RollbackHandle::new(String::new(), vec![1, 2, 3]);
+        let model = themql_schema::TrainedModel {
+            model_bytes: vec![1, 2, 3],
+            format: themql_schema::ModelFormat::TorchScript,
+            feature_schema: themql_schema::FeatureSchema {
+                features: vec![],
+                normalization: themql_schema::NormalizationSpec::None,
+            },
+            validation_metrics: themql_schema::ValidationMetrics {
+                loss: 0.0,
+                accuracy: None,
+                custom: std::collections::BTreeMap::new(),
+            },
+        };
+        let h = RollbackHandle::new(String::new(), model);
         assert!(h.restore().is_err());
     }
 

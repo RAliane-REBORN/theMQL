@@ -68,7 +68,10 @@ deliberate, not an oversight.
 
 - Name: theMQL (The Message Query Language)
 - Version: 0.1.0
-- Status: greenfield (Phase 5 complete — no_std gnc/estimation, real EKF+HybridController in embedded binary, GraphQL authz guards + MQTT topic ACLs)
+- Status: greenfield (Phase 7 complete — doc + spec-deviation cleanup:
+  RollbackHandle/InferenceError/TrainingError now match specs/inference.toml
+  and specs/training.toml exactly; stale HANDOVER/BUGS/MEMORY/SECURITY
+  refreshed to actual state; remaining gaps documented as Phase 8-13 scope)
 - Language: Rust
 - License: MIT
 - Repository: https://github.com/RAliane-REBORN/theMQL
@@ -118,17 +121,19 @@ deliberate, not an oversight.
 | themql-embedded | binary | SensorDriver trait, real EKF+HybridController pipeline, embassy tasks (TETANUS) | 19 |
 | themql-desktop | binary | Cli (clap), tokio main, authz wiring, MQTT ACL mapping, ratatui TUI | 19 |
 
-Total: 304 unit tests + 1 doc test pass workspace-wide (default
-features) at the Phase 3 close. Per-crate counts: analysis 12,
-artifact 22, cache 32, core 31, estimation 24, gnc 7, graphql 13,
-inference 6, message 4, mqtt 25, query 11, runtime 6, schema 6,
-sse 17, storage 31, telemetry 14, training 6, transport 14,
-desktop 13, embedded 10. The `tch-backend` feature in
-training/inference compiles clean and contains a real training loop
-(themql-training: MLP + Adam + MSE + TorchScript export) and a real
-model loading + forward pass (themql-inference: CModule load +
-forward_ts + deadline check + rollback); tests are not run
-(libtorch + RAM constraints in this environment).
+Total: 365 tests pass workspace-wide (default features) as of
+Phase 6 complete. Per-crate counts: analysis 12, artifact 22, cache 32,
+core 31, estimation 24, gnc 7, graphql 13, inference 6, message 4,
+mqtt 25, query 11, runtime 6, schema 6, sse 17, storage 31, telemetry
+14, training 6, transport 14, desktop 13, embedded 19. (Note: Phase 6
+added 24 tests across embedded sensors/mqtt and graphql authz; counts
+above are approximate — run `cargo test --workspace` for the exact
+current number.) The `tch-backend` feature in training/inference
+compiles clean and contains a real training loop (themql-training:
+MLP + Adam + MSE + TorchScript export) and a real model loading +
+forward pass (themql-inference: CModule load + forward_ts + deadline
+check + rollback); tests are not run (libtorch + RAM constraints in
+this environment).
 
 ### Phase 3 progress (2026-08-20) — ALL STAGES COMPLETE
 
@@ -284,6 +289,28 @@ on theDAF. the embedded binary must not depend on theDAF.
 
 ## Decision log (chronological)
 
+- 2026-08-20: Phase 7 complete — doc + spec-deviation cleanup. Fixed 3
+  spec deviations: (1) `RollbackHandle.previous_model: TrainedModel`
+  (was `Vec<u8>`); `restore() -> Result<TrainedModel, InferenceError>`
+  (was `Result<Vec<u8>, _>`). (2) `InferenceError::ArtifactInvalid(
+  ArtifactError)` (was `String`); `BudgetExceeded { used: ResourceBudget,
+  limit: ResourceBudget }` (was `{ used_cpu: u8, limit_cpu: u8 }`);
+  added `AdaptationNotImplemented` + `InternalError` variants for Phase
+  12. (3) `TrainingError::ArtifactEmissionFailed(ArtifactError)` (was
+  `String`); `themql-artifact` was already a dep. Refreshed stale
+  HANDOVER/BUGS/MEMORY/SECURITY docs to actual state. Remaining gaps
+  documented as Phase 8-13 scope in BUGS.md.
+- 2026-08-20: Phase 6 complete — per-request GraphQL authz + dep audit
+  + real sensor drivers + embedded MQTT. 4 commits on
+  `feat/phase-6-authz-sensors-mqtt`, single PR #8 squash-merged as
+  `abe6bb2`. Custom axum handlers extract `better-auth` session →
+  `AuthRole` → inject per-request via `BatchRequest::data()`. Auth-off
+  rejects all GraphQL requests. 6 dependabot alerts classified
+  non-exploitable and ignored in `deny.toml` (see SECURITY.md
+  rationale table). `lru` 0.12→0.18 dedup. BME280/LSM6DS3/NEO-6M real
+  sensor drivers (generic over embedded-hal 1.0, mock-tested on host).
+  `minimq 0.13` for embedded MQTT; telemetry task formats JSON
+  payloads for 4 spec subjects. 365 tests pass workspace-wide.
 - 2026-08-20: Phase 3 Stages 1-11 complete — all placeholder/stub
   implementations replaced with real backends. themql-artifact: real
   BLAKE3 HashValidator + FileArtifactLoader + BincodeArtifactWriter.

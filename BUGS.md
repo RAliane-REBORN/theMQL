@@ -79,12 +79,14 @@ line + date + commit/PR reference when fixed.
 
 ## Known limitations (not bugs, but tracked alongside)
 
-These are spec-acknowledged gaps / v0.1 placeholders, not bugs. Phase 3
-Stages 1-11 are complete: all 20 crates have real `src/` content,
+These are spec-acknowledged gaps / v0.1 placeholders, not bugs. As of
+Phase 7 (2026-08-20), all 20 crates have real `src/` content,
 cache/storage/transport backends (L1 lru, L2 moka, L3 redis, L4 sled),
 runtime impls + desktop/embedded binary wiring, analysis/training/
-inference heavy-dep wiring, cross-crate type reconciliation, and
-safety-critical tooling installed. 305 tests pass workspace-wide
+inference heavy-dep wiring, cross-crate type reconciliation, real
+sensor drivers (BME280/LSM6DS3/NEO-6M), embedded MQTT payload
+formatting (minimq 0.13), per-request GraphQL authz + MQTT ACLs, and
+safety-critical tooling installed. 365 tests pass workspace-wide
 (default features). Full validation green.
 
 ### Safety-critical placeholders (MUST address before deployment)
@@ -93,7 +95,9 @@ safety-critical tooling installed. 305 tests pass workspace-wide
   with Joseph-form covariance update; the HashValidator now uses real
   BLAKE3; the TchInferenceEngine now runs real model load + forward
   pass + rollback behind `tch-backend`. All four safety-critical
-  crates are TETANUS-compliant.)
+  crates are TETANUS-compliant. Spec deviations in `RollbackHandle`,
+  `InferenceError`, and `TrainingError` were fixed in Phase 7 to match
+  `specs/inference.toml` and `specs/training.toml` exactly.)
 
 ### Environment constraints (not bugs)
 
@@ -118,15 +122,58 @@ safety-critical tooling installed. 305 tests pass workspace-wide
 - **`serde-big-array` dependency** — added to workspace.dependencies for
   serializing the 21x21 covariance `[f64; 441]` in themql-telemetry.
   Reassess if a more idiomatic serde path emerges.
-- **GraphQL subscription placeholder (Phase 3 Stage 10)** —
-  `SubscriptionRoot.subscribe(subject)` emits a single placeholder value
-  then completes. Real `themql-message` stream wiring (via the SSE/MQTT
-  bridge) is a follow-up. The `SubscriptionRoot` struct holds an
-  `Option<Arc<dyn GraphqlResolverBridge>>` reserved for that wiring.
-- **`themql-desktop` subcommand bodies** — `serve`/`analyze`/`train`/
-  `validate`/`telemetry` print banners only; real impls are follow-ups.
-- **`themql-embedded` main** — stub on x86 host; embassy requires
-  `thumbv7em` target. Real `#[embassy_executor::main]` is a future task.
+
+### Remaining spec-implementation gaps (Phase 8-13 scope)
+
+These are spec-required features not yet implemented, grouped by the
+phase that will address them:
+
+- **Testing infrastructure (Phase 8)** — no integration tests (all 365
+  are in-crate unit tests; `SPEC.toml [quality] integration_tests_required
+  = true`); no property tests (`property_tests_required = true`; no
+  proptest/quickcheck dep); no benchmarks (`benchmark_hot_paths = true`;
+  no `benches/` dirs, no criterion dep).
+- **Core runtime closures (Phase 9)** — `QueryExecutor` orchestrator
+  not implemented (`specs/query.toml:50`, trait exists at
+  `themql-core/src/lib.rs:1449`, no impl); `EmbassyRuntime::sleep` is a
+  stub (`themql-runtime/src/lib.rs:404`, returns `std::future::pending`);
+  `ThedafAdapter` trait declared but no impl (`themql-analysis/src/lib.rs:178`);
+  MQTT retained messages not supported (`specs/mqtt.toml:34`, no
+  `retain: bool` in publish path); apalis queue not wired
+  (`specs/runtime.toml:111-119`, `apalis = "0.6"` in workspace deps
+  but no crate uses it).
+- **Safety-critical mechanisms (Phase 10)** — controller failure not
+  detectable (`SPEC.toml:244`, `specs/gnc.toml:227`); estimator failure
+  not detectable (`SPEC.toml:243`); ML failure graceful degradation to
+  EKF-only not implemented (`SPEC.toml:242`, `specs/inference.toml:144`);
+  sensor failure partially detectable (`SensorError` variants exist but
+  estimator doesn't consume them for degraded-mode flagging).
+- **Embedded networking (Phase 11)** — embedded MQTT does not publish
+  over the network (`themql-embedded/src/main.rs:558`, `embassy-net` TCP
+  transport not wired; telemetry task formats payloads but
+  `publish_count += 1` is a placeholder); command task does not subscribe
+  to MQTT (`themql-embedded/src/main.rs:594`, "waits indefinitely").
+- **Training pipeline completeness (Phase 12)** — `TrainerKind` variants
+  Pinn/GradientBoosting/FineTuning declared but `train_dense` ignores
+  `kind` and always runs MLP+Adam+MSE; `PruningConfig`/`SparsificationConfig`
+  types exist but `train_dense` never reads `config.pruning`/`config.
+  sparsification`; online adaptation method missing from
+  `InferenceEngine` trait (`specs/inference.toml:42-44`). All behind
+  `tch-backend` feature; compile-only verification (tests can't run
+  here).
+- **Desktop dioxus UI (Phase 13)** — `specs/desktop.toml [ui]
+  framework = "dioxus"` and `[api.DesktopRoot]` not implemented
+  (only ratatui TUI exists). `dioxus = "0.5"` in workspace deps but no
+  crate uses it. Spec amendment + pnpm toolchain carve-out required
+  (`SPEC.toml [architecture.forbidden] typescript_runtime = true`
+  vs. pnpm/Playwright dev tooling).
+- **Other spec-implementation gaps** — `mqtt_graphql_bridge` not
+  implemented (`SPEC.toml:162`, only `mqtt_sse_bridge` exists);
+  `HelixStorage` is `pub type HelixStorage = SledStorage` (sled-backed,
+  not real helix-db; `SPEC.toml:61 l4_cache = "helixdb"`); no `ImuModel`
+  in estimation (IMU is consumed directly in `predict`, which is
+  architecturally correct for an EKF, but no `SensorModel` impl exists
+  for IMU measurement updates).
 
 ### Infrastructure-dependent backends (not bugs)
 
@@ -143,17 +190,20 @@ safety-critical tooling installed. 305 tests pass workspace-wide
 
 - `cargo-deny`, `cargo-machete`, `cargo-bloat` installed and passing.
   `cargo deny check` passes (BSL-1.0 + CDLA-Permissive-2.0 added to
-  allowed licenses, 10 RUSTSEC advisory ignores for unmaintained/
-  unsound transitive deps). `cargo machete --with-metadata` clean (11
-  unused deps removed). `cargo bloat` passes on desktop binary.
+  allowed licenses, 6 RUSTSEC advisory ignores for non-exploitable
+  transitive deps). `cargo machete --with-metadata` clean. `cargo bloat`
+  passes on desktop binary.
 - `opencode.json` written with `$schema`, `instructions: ["AGENTS.md"]`,
   permission rules, and `validate` + `safety-gate` custom commands.
 - `scripts/ci_guard.py` checks TOML parse + crate-name-vs-workspace
   invariant. All checks pass.
+- CI: 9 jobs (fmt, check, clippy, test, toml-sanity, ci-guard, deny,
+  machete, embedded-check). Missing: `cargo bloat` job, `cargo miri`
+  job (no unsafe exists, so miri is dormant), clippy/deny/machete on
+  the embedded no_std cross-build.
 - `mold`, `sccache` not installed. Config files (`.cargo/config.toml`)
   are ready for when they are. Install: `apt install mold`,
   `cargo install sccache`. Then uncomment the relevant lines.
-- No GitHub Actions CI workflow yet (follow-up).
 - No fuzzing harness, no dependency-audit pipeline, no secret-management
   policy. Tracked in `SECURITY.md` known limitations.
 
