@@ -2,16 +2,32 @@
 name = "inference"
 crate = "themql-inference"
 domain = "embedded"
+safety_critical = true
+tetanus = true
 
 [purpose]
 description = """
 Embedded model execution: PINN inference, sparse inference,
 Bayesian update, and constrained online adaptation under
-explicit resource budgets and rollback rules.
+explicit resource budgets and rollback rules. Inference is
+augmentative only — never the authoritative flight-control path.
 """
+
+[references]
+related = [
+    "specs/model_artifact.toml",  # artifact loading + validation
+    "specs/state_estimation.toml",  # ML correction is augmentative to EKF
+    "specs/gnc.toml"               # ML must not be control authority
+]
 
 [framework]
 primary = "tch-rs"
+crate_registry_name = "tch"
+notes = "Published as `tch` on crates.io, not `tch-rs`."
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
 
 [capabilities]
 pinn_inference = true
@@ -19,11 +35,118 @@ sparse_inference = true
 bayesian_update = true
 online_adaptation = true
 
+# ---------------------------------------------------------------------------
+# Online adaptation — explicit budgets + rollback
+# ---------------------------------------------------------------------------
+
 [online]
 adaptation = true
 training = true
 resource_budget_required = true
 rollback_required = true
+
+[api.ResourceBudget]
+description = """
+Explicit resource budget for online adaptation. The runtime refuses
+to start an online update if the budget would be exceeded.
+"""
+rust_type = """
+struct ResourceBudget {
+    cpu_budget_pct: u8,           # max % of one core
+    memory_budget_bytes: u64,     # max resident memory for adaptation
+    inference_deadline_ms: u16,   # max wall time for a single inference
+    adaptation_deadline_ms: u16,  # max wall time for one online update step
+}
+"""
+constraints = ["budget is fixed at activation; cannot be exceeded without explicit re-activation"]
+
+[api.RollbackHandle]
+description = """
+Handle to the previous (last-known-good) model. On activation failure
+or budget overrun, the runtime restores the previous model via this
+handle. The handle owns the previous model's state — no copy.
+"""
+rust_type = """
+struct RollbackHandle {
+    previous_model_id: String,
+    previous_model: TrainedModel,  # opaque bytes + metadata
+}
+"""
+methods = [
+    "fn restore(self) -> Result<TrainedModel, InferenceError>"
+]
+
+# ---------------------------------------------------------------------------
+# InferenceEngine trait
+# ---------------------------------------------------------------------------
+
+[api.InferenceEngine]
+description = """
+Primary inference trait. load() validates and activates an artifact;
+infer() runs a single inference; rollback() restores the previous model.
+"""
+rust_type = """
+trait InferenceEngine: Send + Sync {
+    fn load(&mut self, artifact: ModelArtifact) -> Result<ActivationHandle, InferenceError>;
+    fn infer(&self, input: &InferenceInput) -> Result<InferenceOutput, InferenceError>;
+    fn rollback(&mut self, handle: RollbackHandle) -> Result<(), InferenceError>;
+    fn active_model(&self) -> Option<&ModelArtifact>;
+}
+"""
+methods = [
+    "load — validates artifact via themql-artifact, activates atomically, retains previous for rollback",
+    "infer — runs one forward pass; checks inference_deadline; returns InferenceOutput or InferenceError::DeadlineExceeded",
+    "rollback — restores the previous model from the handle; atomic",
+    "active_model — returns the currently-active model artifact, if any"
+]
+
+[api.InferenceInput]
+rust_type = """
+struct InferenceInput {
+    pub state: EstimatorState,        # current EKF state
+    pub sensor_snapshot: SensorReading,  # latest sensor data
+    pub budget: ResourceBudget,
+}
+"""
+
+[api.InferenceOutput]
+rust_type = """
+struct InferenceOutput {
+    pub state_correction: nalgebra::SVector<f64, 21>,  # residual to apply to EKF state
+    pub confidence: f64,                                # 0.0..=1.0
+    pub latency_ns: u64,
+}
+"""
+notes = "state_correction is applied by the EKF as a pseudo-measurement; ML never writes state directly"
+
+[api.ActivationHandle]
+rust_type = """
+struct ActivationHandle {
+    pub model_id: String,
+    pub rollback: RollbackHandle,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Authority — augmentative only
+# ---------------------------------------------------------------------------
+
+[authority]
+flight_control = false
+primary_ekf = false
+state_correction = true
+anomaly_detection = true
+prediction = true
+
+[authority.invariants]
+ml_must_not_be_required_for_basic_flight = true
+ml_must_not_silently_replace_ekf = true
+ml_failure_must_degrade_to_ekf_only = true
+ml_correction_applied_as_pseudo_measurement = true
+
+# ---------------------------------------------------------------------------
+# Model artifact integration
+# ---------------------------------------------------------------------------
 
 [model_artifact]
 crate = "themql-artifact"
@@ -34,12 +157,58 @@ validation_before_activation = true
 previous_model_retained = true
 failed_activation_reverts = true
 
-[authority]
-flight_control = false
-primary_ekf = false
-state_correction = true
-anomaly_detection = true
-prediction = true
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
+
+[api.InferenceError]
+rust_type = """
+enum InferenceError {
+    ArtifactInvalid(ArtifactError),
+    BudgetExceeded { used: ResourceBudget, limit: ResourceBudget },
+    DeadlineExceeded { deadline_ms: u16, actual_ms: u16 },
+    RollbackFailed(String),
+    ModelNotLoaded,
+    InferenceFailed(String),
+    SchemaMismatch { expected: String, got: String },
+}
+"""
+mapping_to_core_error = "InferenceError -> themql_core::Error::internal_error"
+notes = "ArtifactError is re-exported from themql-artifact"
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
+[numerics]
+tensor_library = "tch"
+conventional_library = "nalgebra"
+state_correction_type = "nalgebra::SVector<f64, 21>"
+notes = "tch for tensor ops inside the model; nalgebra for the state_correction output vector"
+
+# ---------------------------------------------------------------------------
+# TETANUS compliance
+# ---------------------------------------------------------------------------
+
+[tetanus]
+applies = true
+rules_enforced = [
+    "no recursion",
+    "fixed loop bounds (inference batch size capped by ResourceBudget)",
+    "no heap allocation after init EXCEPT model activation (atomic swap) — no per-step alloc",
+    "functions <= 60 lines",
+    ">= 2 assertions per function",
+    "smallest possible scope for data objects",
+    "check all Result return values; no unwrap()/expect()",
+    "simple macros only; no recursive macro_rules",
+    "one level of pointer dereference",
+    "zero warnings at clippy::pedantic + deny(warnings)"
+]
+notes = """
+Model activation is the one place heap allocation is allowed (loading a
+new ModelArtifact). Per-inference step must be allocation-free: tch
+tensors are pre-allocated at activation; reuse across calls.
+"""
 
 [constraints]
 ml_must_not_be_required_for_basic_flight = true

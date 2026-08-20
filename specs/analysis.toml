@@ -2,6 +2,24 @@
 name = "analysis"
 crate = "themql-analysis"
 domain = "desktop"
+safety_critical = false
+tetanus = false
+
+[purpose]
+description = """
+Desktop analytical processing of telemetry data using polars. Builds
+Datasets for themql-training, runs statistical analysis, and provides a
+thin theDAF adapter for legacy data access and migration reference.
+Polars is the semantic owner of dataframe operations; this crate does
+not reimplement dataframe primitives.
+"""
+
+[references]
+related = [
+    "specs/telemetry.toml",  # input schema
+    "specs/training.toml",   # Dataset consumer
+    "specs/storage.toml"     # data source
+]
 
 [framework]
 dataframe = "polars"
@@ -14,8 +32,121 @@ statistical_analysis = true
 batch_processing = true
 parallel_processing = true
 
+# ---------------------------------------------------------------------------
+# AnalysisPipeline trait
+# ---------------------------------------------------------------------------
+
+[api.AnalysisPipeline]
+description = """
+Top-level analysis trait. run() consumes a telemetry query result and
+produces an AnalysisResult (a polars DataFrame + metadata). Pipelines
+are composed — a pipeline may wrap other pipelines.
+"""
+rust_type = """
+trait AnalysisPipeline: Send + Sync {
+    async fn run(&self, input: &AnalysisInput, ctx: &Context) -> Result<AnalysisResult, AnalysisError>;
+}
+"""
+
+[api.AnalysisInput]
+rust_type = """
+enum AnalysisInput {
+    Telemetry { from: Timestamp, to: Timestamp, subject_pattern: SubjectPattern },
+    StorageQuery(StorageQuery),
+    DataFrame(polars::prelude::DataFrame),
+}
+"""
+
+[api.AnalysisResult]
+rust_type = """
+struct AnalysisResult {
+    pub frame: polars::prelude::DataFrame,
+    pub schema: FeatureSchema,  # re-export from training.toml
+    pub stats: AnalysisStats,
+}
+"""
+[api.AnalysisStats]
+rust_type = """
+struct AnalysisStats {
+    pub rows: u64,
+    pub columns: u32,
+    pub null_count: u64,
+    pub generated_at: Timestamp,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Dataset — for training
+# ---------------------------------------------------------------------------
+
+[api.Dataset]
+description = """
+Dataset for themql-training. Built from an AnalysisResult via a
+DatasetBuilder. Polars DataFrame-backed.
+"""
+rust_type = """
+struct Dataset {
+    pub features: polars::prelude::DataFrame,
+    pub labels: polars::prelude::DataFrame,
+    pub feature_schema: FeatureSchema,
+}
+"""
+notes = "Same shape as specs/training.toml [api.Dataset] — re-exported from there canonically"
+
+[api.DatasetBuilder]
+rust_type = """
+struct DatasetBuilder {
+    pub feature_columns: Vec<String>,
+    pub label_columns: Vec<String>,
+    pub normalization: NormalizationSpec,
+}
+"""
+methods = [
+    "fn build(&self, result: AnalysisResult) -> Result<Dataset, AnalysisError>"
+]
+
+# ---------------------------------------------------------------------------
+# theDAF adapter
+# ---------------------------------------------------------------------------
+
+[api.ThedafAdapter]
+description = """
+Thin adapter for legacy theDAF data access. Used for migration
+reference and comparison against the new polars-based implementation.
+theDAF is NOT a core or embedded dependency.
+"""
+rust_type = """
+trait ThedafAdapter: Send + Sync {
+    async fn fetch_legacy(&self, query: &str) -> Result<polars::prelude::DataFrame, AnalysisError>;
+    async fn list_legacy_datasets(&self) -> Result<Vec<String>, AnalysisError>;
+}
+"""
+notes = "Implementation lives outside the core; the trait is the boundary. theDAF is integration-only."
+
+# ---------------------------------------------------------------------------
+# Parallelism
+# ---------------------------------------------------------------------------
+
 [parallelism]
 implementation = "rayon"
+purpose = ["cpu_bound_work", "parallel_analysis", "polars_parallelism"]
+
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
+
+[api.AnalysisError]
+rust_type = """
+enum AnalysisError {
+    PolarsError(String),
+    StorageError(StorageError),
+    ThedafError(String),
+    SchemaMismatch { expected: String, got: String },
+    InternalError(String),
+}
+"""
+mapping_to_core_error = "AnalysisError -> themql_core::Error::internal_error or resolver_error"
+notes = "StorageError re-exported from themql-storage"
 
 [thedaf]
 enabled = true
@@ -31,3 +162,5 @@ purpose = [
 thedaf_core_dependency = false
 thedaf_embedded_dependency = false
 polars_semantic_owner = true
+reimplementing_polars = false
+analysis_types_must_not_escape_to_core = true

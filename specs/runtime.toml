@@ -1,12 +1,112 @@
 [subsystem]
 name = "runtime"
 crate = "themql-runtime"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+Execution runtime abstraction for theMQL. Desktop uses tokio; embedded
+uses embassy. Library crates that need to spawn tasks or await
+cancellation depend on one of two runtime traits — DesktopRuntime or
+EmbeddedRuntime — selected at compile time via cfg. There is NO shared
+Runtime trait: tokio and embassy differ enough in shape that a unifying
+trait would force speculative abstractions (forbidden by
+prompts/IMPLEMENTER.md).
+"""
+
+[references]
+related = [
+    "specs/core.toml",
+    "specs/cache.toml",
+    "specs/transport.toml"
+]
+
+[architecture]
+two_traits = true
+shared_trait = false
+selection = "compile-time cfg(feature = \"desktop\") / cfg(feature = \"embedded\")"
+library_crates = "depend on the trait corresponding to their target domain"
+binary_crates = "pick the impl — themql-desktop enables desktop, themql-embedded enables embedded"
+
+# ---------------------------------------------------------------------------
+# DesktopRuntime — tokio-backed
+# ---------------------------------------------------------------------------
 
 [desktop]
 runtime = "tokio"
+crate = "tokio"
+feature = "desktop"
+
+[api.DesktopRuntime]
+description = """
+Tokio-backed runtime trait. Implemented once in themql-runtime behind
+cfg(feature = \"desktop\"). Library crates with domain = 'desktop' or
+'cross-cutting' depend on this trait.
+"""
+rust_type = """
+trait DesktopRuntime: Send + Sync + 'static {
+    type JoinHandle<T: Send + 'static>: Future<Output = Result<T, JoinError>> + Send + Unpin;
+    fn spawn<F, T>(&self, fut: F) -> Self::JoinHandle<T>
+    where F: Future<Output = T> + Send + 'static, T: Send + 'static;
+    fn sleep(&self, dur: Duration) -> impl Future<Output = ()> + Send;
+    fn timeout<F, T>(&self, dur: Duration, fut: F) -> impl Future<Output = Result<T, Elapsed>> + Send
+    where F: Future<Output = T> + Send, T: Send;
+    fn channel<T: Send>(&self, bound: usize) -> (Sender<T>, Receiver<T>);
+    fn cancellation(&self) -> CancellationToken;
+}
+"""
+methods = [
+    "spawn — schedules a future on the tokio runtime; returns a JoinHandle",
+    "sleep — non-blocking delay",
+    "timeout — wraps a future with a deadline; returns Err(Elapsed) on expiry",
+    "channel — bounded mpsc channel with explicit backpressure",
+    "cancellation — returns a CancellationToken that propagates through async paths"
+]
+notes = """
+Wrapping tokio in a trait is mostly a thin re-export; we do NOT reimplement
+tokio. The trait exists so library crates can depend on a stable name and
+binary crates can substitute a mock in tests.
+"""
+
+# ---------------------------------------------------------------------------
+# EmbeddedRuntime — embassy-backed
+# ---------------------------------------------------------------------------
 
 [embedded]
 runtime = "embassy"
+crate = "embassy-executor"
+feature = "embedded"
+
+[api.EmbeddedRuntime]
+description = """
+Embassy-backed runtime trait. Implemented once in themql-runtime behind
+cfg(feature = \"embedded\"). Library crates with domain = 'embedded' or
+'cross-cutting-on-embedded' depend on this trait.
+"""
+rust_type = """
+trait EmbeddedRuntime: Send + Sync + 'static {
+    type SpawnHandle: Spawn + Send + Sync;
+    fn spawner(&self) -> Self::SpawnHandle;
+    async fn sleep(&self, dur: Duration);
+    fn signal<T: Send>(&self) -> Signal<T>;
+    fn cancellation(&self) -> Signal<Cancelled>;
+}
+"""
+methods = [
+    "spawner — returns an embassy Spawner for spawning tasks",
+    "sleep — embassy::time::Timer-based delay",
+    "signal — embassy_sync::signal::Signal for one-shot values",
+    "cancellation — embassy Signal<Cancelled> checked in async loops"
+]
+notes = """
+Embassy is async/executor-based but no_std-shaped; there is no JoinHandle
+with a return value the way tokio has. Tasks communicate results via
+channels/signals. The trait reflects that shape, not tokio's.
+"""
+
+# ---------------------------------------------------------------------------
+# Queue — apalis for background jobs (desktop)
+# ---------------------------------------------------------------------------
 
 [queue]
 implementation = "apalis"
@@ -15,6 +115,12 @@ purpose = [
     "asynchronous_processing",
     "message_workflows"
 ]
+scope = "desktop-only"
+embedded_supports_queue = false  # embassy has its own task model; apalis not used on embedded
+
+# ---------------------------------------------------------------------------
+# Parallelism — rayon (desktop only)
+# ---------------------------------------------------------------------------
 
 [parallelism]
 implementation = "rayon"
@@ -23,14 +129,25 @@ purpose = [
     "parallel_analysis",
     "desktop_training_support"
 ]
+scope = "desktop-only"
+embedded_supports_rayon = false  # no_std, no threads
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
 
 [concurrency]
 structured = true
 cancellation = true
 backpressure = true
 bounded_channels_preferred = true
+cancellation_token_canonical = "DesktopRuntime::cancellation / EmbeddedRuntime::cancellation"
 
 [constraints]
 blocking_work_on_async_executor = false
 unbounded_channels_by_default = false
 implicit_global_runtime = false
+shared_runtime_trait = false  # per user decision 2026-08-19 — two separate traits
+tokio_in_embedded = false
+embassy_on_desktop = "not typical; desktop uses tokio"
+reimplementing_tokio_or_embassy = false

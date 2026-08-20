@@ -2,19 +2,75 @@
 name = "desktop"
 crate = "themql-desktop"
 binary = "themql-desktop"
+domain = "desktop"
+safety_critical = false
+tetanus = false
+
+[purpose]
+description = """
+Desktop binary. Primary development, analysis, training, telemetry,
+and operational environment. Provides CLI, TUI, and Dioxus UI.
+Composes all desktop-capable crates: themql-graphql, themql-sse,
+themql-mqtt (desktop-mode), themql-analysis, themql-training,
+themql-storage, themql-cache, themql-runtime (desktop), themql-artifact.
+"""
+
+[references]
+related = [
+    "specs/runtime.toml",
+    "specs/graphql.toml",
+    "specs/sse.toml",
+    "specs/mqtt.toml",
+    "specs/analysis.toml",
+    "specs/training.toml",
+    "specs/storage.toml",
+    "specs/cache.toml",
+    "specs/artifact.toml",
+    "specs/telemetry.toml"
+]
+
+# ---------------------------------------------------------------------------
+# UI — Dioxus
+# ---------------------------------------------------------------------------
 
 [ui]
 framework = "dioxus"
+crate = "dioxus"
+version = "0.5"
+
+[api.DesktopRoot]
+description = """
+Dioxus root component. Composes telemetry view, training view,
+analysis view, and the operational dashboard. Not a library export —
+this is the binary's entry into dioxus.
+"""
+rust_type = """
+fn DesktopRoot(cx: Scope) -> Element {
+    // composes TelemetryView, TrainingView, AnalysisView, DashboardView
+}
+"""
+
+# ---------------------------------------------------------------------------
+# API surface
+# ---------------------------------------------------------------------------
 
 [api]
 graphql = "async-graphql"
 sse = true
 mqtt = true
 
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+
 [analysis]
 polars = true
 thedaf_integration = true
 rayon = true
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
 [training]
 crate = "themql-training"
@@ -25,6 +81,10 @@ fine_tuning = true
 pruning = true
 artifact_generation = true
 
+# ---------------------------------------------------------------------------
+# Storage + cache
+# ---------------------------------------------------------------------------
+
 [storage]
 helixdb = true
 valkey = true
@@ -34,13 +94,106 @@ l1 = true
 l2 = true
 l3 = true
 
+# ---------------------------------------------------------------------------
+# CLI — clap
+# ---------------------------------------------------------------------------
+
 [cli]
-clap = true
+framework = "clap"
+crate = "clap"
+version = "4"
+
+[api.Cli]
+rust_type = """
+#[derive(clap::Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+enum Command {
+    /// Start the desktop server (GraphQL + SSE + MQTT bridge + UI)
+    Serve(ServeArgs),
+    /// Run a one-shot analysis pipeline
+    Analyze(AnalyzeArgs),
+    /// Train a model and emit an artifact
+    Train(TrainArgs),
+    /// Validate a model artifact without activating it
+    Validate(ValidateArgs),
+    /// Inspect telemetry stored in helix-db
+    Telemetry(TelemetryArgs),
+    /// Launch the TUI dashboard
+    Tui,
+}
+"""
+[api.ServeArgs]
+rust_type = """
+struct ServeArgs {
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: String,
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+    #[arg(long, default_value_t = false)]
+    enable_mqtt: bool,
+}
+"""
+[api.TrainArgs]
+rust_type = """
+struct TrainArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long, default_value = "dense")]
+    kind: String,
+    #[arg(long, default_value_t = 100)]
+    epochs: u32,
+    #[arg(long)]
+    output: String,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# TUI — ratatui
+# ---------------------------------------------------------------------------
 
 [tui]
-ratatui = true
+framework = "ratatui"
+crate = "ratatui"
+version = "0.30"
+
+[api.TuiLayout]
+description = """
+TUI dashboard layout. Three panes: telemetry stream (top), state
+estimate + covariance (middle), controller state + actuator commands
+(bottom). Not a library export.
+"""
+panes = ["telemetry_stream", "state_estimate", "controller_state"]
+
+# ---------------------------------------------------------------------------
+# Main entry
+# ---------------------------------------------------------------------------
+
+[entry]
+main = """
+fn main() -> Result<(), themql_core::Error> {
+    let cli = Cli::parse();
+    let rt = DesktopRuntimeImpl::new()?;
+    rt.block_on(async {
+        match cli.command {
+            Command::Serve(args) => commands::serve(args).await,
+            Command::Analyze(args) => commands::analyze(args).await,
+            Command::Train(args) => commands::train(args).await,
+            Command::Validate(args) => commands::validate(args).await,
+            Command::Telemetry(args) => commands::telemetry(args).await,
+            Command::Tui => commands::tui().await,
+        }
+    })
+}
+"""
+notes = "Uses DesktopRuntime (tokio); embassy never appears in this binary."
 
 [constraints]
 embedded_dependencies = false
 flight_control_authority = false
 training_on_embedded = false
+dioxus_only_on_desktop = true
+embassy_not_used = true

@@ -9,3 +9,4 @@ name = "themql-embedded"
 path = "src/main.rs"
 
 [dependencies]
+themql-core.workspace = true

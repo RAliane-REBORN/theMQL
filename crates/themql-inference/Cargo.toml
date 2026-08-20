@@ -4,4 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "themql_inference"
+path = "src/lib.rs"
+
 [dependencies]
+themql-core.workspace = true
+themql-artifact.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true

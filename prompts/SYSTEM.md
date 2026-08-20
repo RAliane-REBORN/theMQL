@@ -48,12 +48,25 @@ Use:
 - Dioxus for desktop UI
 - Polars for analytical data processing
 - tch-rs for ML tensors/training/inference
-- ndarray for conventional numerical computation
+- nalgebra for conventional numerical computation (incl. quaternion
+  attitude representation)
+- ndarray for raw ML-side array buffers only (not for GNC/estimation/
+  inference linear algebra)
 - clap for CLI
 - Ratatui for TUI
 
 Do not reimplement functionality already provided by these
 dependencies unless a specification explicitly requires it.
+
+## Numerical policy (amended 2026-08-19)
+
+nalgebra is the canonical library for conventional numerical
+computation in non-ML crates: EKF state/covariance, quaternion
+attitude, rotation matrices, linear algebra. tch-rs (published as
+`tch`) remains the canonical library for ML tensors/training/
+inference. ndarray is retained only as a workspace dependency for
+raw ML-side array buffers; it must not be used for GNC, estimation, or
+inference linear-algebra paths.
 
 ## Semantic ownership
 

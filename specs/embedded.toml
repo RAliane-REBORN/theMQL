@@ -2,28 +2,157 @@
 name = "embedded"
 crate = "themql-embedded"
 binary = "themql-embedded"
+domain = "embedded"
+safety_critical = true
+tetanus = true
+
+[purpose]
+description = """
+Embedded binary. Runs on the flight controller (thumbv7em or riscv32imc).
+Composes themql-runtime (embedded/embassy), themql-mqtt, themql-gnc,
+themql-estimation, themql-inference, themql-artifact, themql-telemetry.
+Must not depend on desktop infrastructure (dioxus, polars, helix-db,
+valkey, theDAF, training).
+"""
+
+[references]
+related = [
+    "specs/runtime.toml",
+    "specs/mqtt.toml",
+    "specs/gnc.toml",
+    "specs/state_estimation.toml",
+    "specs/inference.toml",
+    "specs/model_artifact.toml",
+    "specs/telemetry.toml"
+]
+
+# ---------------------------------------------------------------------------
+# Runtime — embassy
+# ---------------------------------------------------------------------------
 
 [runtime]
 framework = "embassy"
+crate = "embassy-executor"
+trait = "EmbeddedRuntime"
+
+# ---------------------------------------------------------------------------
+# MQTT — embassy
+# ---------------------------------------------------------------------------
 
 [mqtt]
 enabled = true
 implementation = "embassy"
+
+# ---------------------------------------------------------------------------
+# Sensors — canonical
+# ---------------------------------------------------------------------------
 
 [sensors]
 gps = "NEO-6M"
 barometer = "BME280"
 imu = "GY-LSM6DS3"
 
+# ---------------------------------------------------------------------------
+# Sensor driver trait
+# ---------------------------------------------------------------------------
+
+[api.SensorDriver]
+description = """
+Trait for sensor drivers. Each driver reads its sensor on a fixed
+schedule and produces a SensorReading. Drivers are async (embassy
+tasks) but the read itself may be sync (I2C/SPI/UART block on a
+peripheral, not on async I/O).
+"""
+rust_type = """
+trait SensorDriver: Send + Sync {
+    async fn read(&mut self) -> Result<SensorReading, SensorError>;
+    fn kind(&self) -> SensorKind;
+    fn rate_hz(&self) -> u32;
+}
+"""
+
+[api.SensorError]
+rust_type = """
+enum SensorError {
+    BusError(String),
+    Timeout,
+    SensorNotResponding,
+    InvalidReading(String),
+    CalibrationRequired,
+}
+"""
+
+[api.GpsDriver]
+rust_type = "struct GpsDriver { /* UART peripheral handle */ }"
+[api.BaroDriver]
+rust_type = "struct BaroDriver { /* I2C peripheral handle */ }"
+[api.ImuDriver]
+rust_type = "struct ImuDriver { /* SPI/I2C peripheral handle */ }"
+
+# ---------------------------------------------------------------------------
+# Embassy task topology
+# ---------------------------------------------------------------------------
+
+[tasks]
+topology = """
+main task:
+  - spawns sensor tasks (gps, baro, imu)
+  - spawns estimator task (consumes sensor readings, runs EKF)
+  - spawns controller task (consumes state, runs GNC, emits actuator commands)
+  - spawns telemetry task (publishes StateEstimateReading + CovarianceReading + ControllerStateReading via MQTT)
+  - spawns inference task (consumes state + sensor snapshot, runs ML correction, emits state_correction)
+  - spawns command task (subscribes to command subject, dispatches to controller setpoint)
+"""
+
+[tasks.sensors]
+gps_rate_hz = 10
+baro_rate_hz = 50
+imu_rate_hz = 200
+
+[tasks.estimator]
+predicts_at_imu_rate = true
+updates_gps_at_gps_rate = true
+updates_baro_at_baro_rate = true
+
+[tasks.controller]
+runs_at_imu_rate = true
+controller = "HybridController per specs/gnc.toml"
+
+[tasks.telemetry]
+publishes_at_10_hz = true
+subjects = [
+    "vehicle.state_estimate",
+    "vehicle.covariance",
+    "vehicle.controller_state",
+    "vehicle.diagnostics"
+]
+
+[tasks.inference]
+runs_at_5_hz = true
+budget_enforced = true
+rollback_ready = true
+
+# ---------------------------------------------------------------------------
+# State estimation
+# ---------------------------------------------------------------------------
+
 [state_estimation]
 ekf = true
 bayesian = true
 quaternion = true
 
+# ---------------------------------------------------------------------------
+# GNC
+# ---------------------------------------------------------------------------
+
 [gnc]
 pid = true
 lqri = true
 hybrid_lqri_pid = true
+
+# ---------------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------------
 
 [inference]
 crate = "themql-inference"
@@ -31,10 +160,59 @@ pinn_inference = true
 sparse_inference = true
 online_adaptation = true
 
+# ---------------------------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------------------------
+
 [deployment]
 model_artifacts = true
 runtime_validation = true
 rollback = true
+
+# ---------------------------------------------------------------------------
+# Main entry
+# ---------------------------------------------------------------------------
+
+[entry]
+main = """
+#[embassy_executor::main]
+async fn main(_spawner: Spawner, _p: Peripherals) {
+    let rt = EmbeddedRuntimeImpl::new();
+    let mut gps = GpsDriver::new(/* peripheral */);
+    let mut baro = BaroDriver::new(/* peripheral */);
+    let mut imu = ImuDriver::new(/* peripheral */);
+    let mut estimator = Ekf::new();
+    let mut controller = HybridController::new(/* policy, pid, lqri */);
+    let mut inference = InferenceEngineImpl::new();
+    let mut telemetry = MqttPublisherImpl::new(/* embassy MQTT */);
+
+    let _gps_task = _spawner.spawn(sensor_task(gps, /* chan */));
+    let _baro_task = _spawner.spawn(sensor_task(baro, /* chan */));
+    let _imu_task = _spawner.spawn(sensor_task(imu, /* chan */));
+
+    loop {
+        // estimator.predict(imu); controller.step(state, setpoint); ...
+        // telemetry.publish(...); inference.infer(...)
+        rt.sleep(Duration::from_millis(5)).await;
+    }
+}
+"""
+notes = "Uses EmbeddedRuntime (embassy); tokio never appears in this binary."
+
+# ---------------------------------------------------------------------------
+# TETANUS compliance — binary crate
+# ---------------------------------------------------------------------------
+
+[tetanus]
+applies = true
+notes = """
+The binary itself orchestrates; the safety-critical code lives in
+themql-gnc, themql-estimation, themql-inference, themql-artifact.
+The binary is listed TETANUS-compliant because it instantiates
+safety-critical types and must not introduce forbidden patterns
+(unsafe, dynamic alloc after init in hot loops, etc.). The main loop
+has fixed iteration count per cycle; no unbounded loops in hot path.
+"""
 
 [constraints]
 dioxus = false
@@ -44,3 +222,5 @@ valkey = false
 thedaf = false
 desktop_training = false
 flight_control_requires_ml = false
+tokio = false
+embassy_only = true

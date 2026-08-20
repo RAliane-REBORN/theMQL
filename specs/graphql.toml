@@ -46,6 +46,36 @@ methods = [
     "fn schema(&self) -> &async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>"
 ]
 
+[api.QueryRoot]
+description = "GraphQL Query root. Each field delegates to a themql-core Resolver via GraphqlResolverBridge."
+rust_type = """
+struct QueryRoot { bridge: Arc<dyn GraphqlResolverBridge> }
+"""
+fields = [
+    "resource(subject: String!, selection: Option<Selection>, args: Option<serde_json::Value>) -> ResponseValue",
+    "resources(pattern: String!) -> Vec<ResponseValue>"
+]
+notes = "Fields are generated from the configured Resolvers; not hand-written per resource"
+
+[api.MutationRoot]
+description = "GraphQL Mutation root. Delegates command dispatch to a MessageHandler."
+rust_type = """
+struct MutationRoot { handler: Arc<dyn MessageHandler> }
+"""
+fields = [
+    "dispatch(subject: String!, payload: serde_json::Value!) -> ResponseValue"
+]
+
+[api.SubscriptionRoot]
+description = "GraphQL Subscription root. Maps to themql-message Stream via SSE/MQTT bridge."
+rust_type = """
+struct SubscriptionRoot { bridge: Arc<dyn GraphqlResolverBridge> }
+"""
+fields = [
+    "subscribe(subject: String!) -> Stream<ResponseValue>"
+]
+notes = "Subscription streams are backed by themql-message's Stream type"
+
 [api.GraphqlResolverBridge]
 description = "Bridge that maps a GraphQL field resolution to a themql-core Resolver call"
 methods = [

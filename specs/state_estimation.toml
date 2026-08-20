@@ -2,24 +2,175 @@
 name = "state_estimation"
 crate = "themql-estimation"
 domain = "embedded"
+safety_critical = true
+tetanus = true
+
+[purpose]
+description = """
+Embedded state estimation. EKF is the primary estimator with Bayesian
+updating and uncertainty propagation. ML is allowed only as augmentative
+state correction, never as the primary estimator. Quaternion attitude
+is canonical (per SPEC.toml and the nalgebra amendment).
+"""
+
+[references]
+related = [
+    "specs/gnc.toml",          # consumes state estimate
+    "specs/inference.toml",   # ML correction is augmentative only
+    "specs/telemetry.toml"    # produces StateEstimateReading + CovarianceReading
+]
 
 [primary]
 algorithm = "EKF"
+
+# ---------------------------------------------------------------------------
+# State — 21-dim, fixed at compile time
+# ---------------------------------------------------------------------------
 
 [state]
 position = true
 velocity = true
 attitude = true
 angular_velocity = true
+accelerometer_bias = true
+gyroscope_bias = true
+baro_altitude_bias = true   # added 2026-08-19 per user decision
+gps_clock_bias = true       # added 2026-08-19 per user decision
+dimension = 21
+layout = """
+[0..3]   position (x, y, z) metres
+[3..6]   velocity (vx, vy, vz) m/s
+[6..10]  attitude quaternion (w, x, y, z) Hamilton, unit norm
+[10..13] angular_velocity (wx, wy, wz) rad/s
+[13..16] accelerometer_bias (bx, by, bz)
+[16..19] gyroscope_bias (gx, gy, gz)
+[19]     baro_altitude_bias
+[20]     gps_clock_bias
+"""
+fixed_at_compile_time = true
+const_generic = false  # TETANUS prefers fixed dimension over const generics
+
+[api.EstimatorState]
+rust_type = """
+struct EstimatorState {
+    pub x: nalgebra::SVector<f64, 21>,       # state vector
+    pub P: nalgebra::SMatrix<f64, 21, 21>,   # covariance
+    pub t: f64,                              # timestamp seconds
+}
+"""
+construction = "EstimatorState::new() -> zero state, identity covariance, t=0"
+clone = "Clone (full copy of 21-dim state + 21x21 cov = ~3.5 KB)"
 
 [attitude]
 representation = "quaternion"
 euler_angles_canonical = false
 gimbal_lock_avoidance = true
+rust_type = "nalgebra::UnitQuaternion<f64> (extracted from x[6..10])"
 
 [bias]
 accelerometer = true
 gyroscope = true
+baro_altitude = true   # added 2026-08-19
+gps_clock = true        # added 2026-08-19
+
+# ---------------------------------------------------------------------------
+# Estimator trait
+# ---------------------------------------------------------------------------
+
+[api.Estimator]
+description = """
+Primary estimator trait. Predict and update are separate steps so
+the runtime can interleave them at the correct rates (IMU predict at
+high rate, GPS/baro update at lower rate). EKF is the canonical
+implementation; Bayesian and ML-correction sit on top.
+"""
+rust_type = """
+trait Estimator: Send + Sync {
+    fn predict(&mut self, dt: f64, imu: &ImuReading) -> Result<(), EstimationError>;
+    fn update_gps(&mut self, gps: &GpsReading) -> Result<(), EstimationError>;
+    fn update_baro(&mut self, baro: &BarometerReading) -> Result<(), EstimationError>;
+    fn state(&self) -> &EstimatorState;
+    fn covariance(&self) -> &nalgebra::SMatrix<f64, 21, 21>;
+}
+"""
+notes = "Sync methods (not async) — runs in hard real-time loop; no I/O"
+
+# ---------------------------------------------------------------------------
+# EKF
+# ---------------------------------------------------------------------------
+
+[api.Ekf]
+description = "Canonical Extended Kalman Filter implementation."
+rust_type = """
+struct Ekf {
+    state: EstimatorState,
+    process_noise: nalgebra::SMatrix<f64, 21, 21>,  # Q
+    gps_noise: nalgebra::SMatrix<f64, 7, 7>,        # R_gps (pos + vel + clock_bias)
+    baro_noise: nalgebra::SMatrix<f64, 2, 2>,       # R_baro (altitude + altitude_bias)
+    imu_noise: nalgebra::SMatrix<f64, 6, 6>,        # R_imu (accel + gyro)
+}
+"""
+methods = [
+    "fn new() -> Self  # pre-allocated; no heap after construction",
+    "fn predict(&mut self, dt: f64, imu: &ImuReading) -> Result<(), EstimationError>",
+    "fn update_gps(&mut self, gps: &GpsReading) -> Result<(), EstimationError>",
+    "fn update_baro(&mut self, baro: &BarometerReading) -> Result<(), EstimationError>",
+    "fn state(&self) -> &EstimatorState"
+]
+notes = """
+All matrices are nalgebra SMatrix with fixed dimensions — stack
+allocated, no heap. predict() propagates state via the nonlinear
+quaternion dynamics; update() applies the Kalman gain using the
+linearised measurement Jacobian.
+"""
+
+# ---------------------------------------------------------------------------
+# Sensor models
+# ---------------------------------------------------------------------------
+
+[api.SensorModel]
+description = """
+Trait for measurement models. Each sensor has a model that produces
+the expected measurement and the Jacobian w.r.t. state.
+"""
+rust_type = """
+trait SensorModel {
+    type Measurement;
+    type Innovation;  # measurement - predicted measurement
+    fn predict_measurement(&self, state: &EstimatorState) -> Self::Measurement;
+    fn jacobian(&self, state: &EstimatorState) -> nalgebra::SMatrix<f64, M, 21>;
+    fn innovation(&self, measurement: &Self::Measurement, predicted: &Self::Measurement) -> Self::Innovation;
+}
+"""
+notes = "M is the measurement dimension; per-sensor models fix M via their concrete impl"
+
+[api.GpsModel]
+rust_type = """
+struct GpsModel;
+impl SensorModel for GpsModel {
+    type Measurement = nalgebra::SVector<f64, 7>;  # lat, lon, alt, vn, ve, vd, clock_bias
+    ...
+}
+"""
+
+[api.BaroModel]
+rust_type = """
+struct BaroModel;
+impl SensorModel for BaroModel {
+    type Measurement = nalgebra::SVector<f64, 2>;  # altitude, altitude_bias
+    ...
+}
+"""
+
+[api.ImuModel]
+rust_type = """
+struct ImuModel;
+# IMU is the predict input, not an update; this struct holds the IMU noise model
+"""
+
+# ---------------------------------------------------------------------------
+# Bayesian
+# ---------------------------------------------------------------------------
 
 [bayesian]
 enabled = true
@@ -27,17 +178,94 @@ updating = true
 sampling = true
 uncertainty_propagation = true
 
-[sensor_fusion]
-gps = true
-barometer = true
-imu = true
+[api.BayesianEstimator]
+rust_type = """
+trait BayesianEstimator: Estimator {
+    fn propagate_uncertainty(&mut self, dt: f64) -> Result<(), EstimationError>;
+    fn sample(&self, n: usize) -> Vec<EstimatorState>;  # for particle filter / sampling
+}
+"""
+notes = "sample() is the only place where bounded heap allocation is allowed (n samples)"
+
+# ---------------------------------------------------------------------------
+# ML — augmentative only
+# ---------------------------------------------------------------------------
 
 [ml]
 allowed_as_state_correction = true
 primary_estimator = false
 required_for_basic_operation = false
+mechanism = """
+themql-inference provides a residual correction vector in state space;
+the EKF applies it as a pseudo-measurement with appropriate (inflated)
+noise covariance. ML failure degrades to EKF-only — never the reverse.
+"""
 
 [constraints]
 deterministic_ekf_path = true
 ml_failure_must_not_disable_ekf = true
 sensor_failure_detection = true
+ml_may_not_be_primary = true
+
+# ---------------------------------------------------------------------------
+# Sensor fusion
+# ---------------------------------------------------------------------------
+
+[sensor_fusion]
+gps = true
+barometer = true
+imu = true
+fusion_order = "predict(IMU) -> update(GPS) -> update(Baro) at sensor-native rates"
+
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
+
+[api.EstimationError]
+rust_type = """
+enum EstimationError {
+    StateDiverged { covariance_trace: f64 },
+    QuaternionNotUnitNorm { norm: f64 },
+    SensorReadingInvalid { reason: String },
+    MatrixNotPositiveDefinite,
+    DtnotPositive { dt: f64 },
+    InternalError(String),
+}
+"""
+mapping_to_core_error = "EstimationError -> themql_core::Error::internal_error"
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
+[numerics]
+library = "nalgebra"
+state_vector_type = "nalgebra::SVector<f64, 21>"
+covariance_type = "nalgebra::SMatrix<f64, 21, 21>"
+quaternion_type = "nalgebra::UnitQuaternion<f64>"
+ndarray_allowed = false
+tch_rs_allowed = false  # estimation never uses tch
+
+# ---------------------------------------------------------------------------
+# TETANUS compliance
+# ---------------------------------------------------------------------------
+
+[tetanus]
+applies = true
+rules_enforced = [
+    "no recursion",
+    "fixed loop bounds (matrix ops over fixed 21x21 dims)",
+    "no heap allocation after init (EKF struct pre-allocated; sample() is the only bounded alloc)",
+    "functions <= 60 lines",
+    ">= 2 assertions per function",
+    "smallest possible scope for data objects",
+    "check all Result return values; no unwrap()/expect()",
+    "simple macros only; no recursive macro_rules",
+    "one level of pointer dereference",
+    "zero warnings at clippy::pedantic + deny(warnings)"
+]
+notes = """
+All nalgebra types are SMatrix/SVector (fixed-size, stack-allocated).
+The Ekf struct holds all matrices by value; no Box, no Vec (except
+sample() which is explicitly bounded).
+"""

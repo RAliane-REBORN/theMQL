@@ -58,6 +58,97 @@ methods = [
     "fn write(&self, model: &TrainedModel, metadata: &ArtifactMetadata) -> Result<ModelArtifact, ArtifactError>"
 ]
 
+# ---------------------------------------------------------------------------
+# Concrete types — referenced in trait signatures above, defined here.
+# TrainedModel is defined canonically in specs/training.toml; ModelArtifact,
+# ArtifactMetadata, ValidationReport, RuntimeInfo, ActivationHandle are
+# defined here.
+# ---------------------------------------------------------------------------
+
+[api.ModelArtifact]
+description = """
+The serialised, hash-stamped, schema-tagged artifact that crosses the
+desktop→embedded boundary. Holds the model bytes, the hash, the
+metadata, and the compatibility info.
+"""
+rust_type = """
+struct ModelArtifact {
+    pub model_bytes: Vec<u8>,
+    pub format: ModelFormat,         # re-export from training.toml
+    pub hash: [u8; 32],              # SHA-256 of model_bytes
+    pub metadata: ArtifactMetadata,
+    pub compatibility: CompatibilityInfo,
+    pub schema_version: u16,
+}
+"""
+serde = "bincode for transfer; JSON for inspection"
+
+[api.ArtifactMetadata]
+rust_type = """
+struct ArtifactMetadata {
+    pub model_id: String,
+    pub training_version: String,
+    pub dataset_version: String,
+    pub feature_schema: FeatureSchema,    # re-export from training.toml
+    pub normalization: NormalizationSpec, # re-export from training.toml
+    pub validation_metrics: ValidationMetrics,
+    pub pruning_metadata: Option<PruningMetadata>,
+}
+"""
+[api.PruningMetadata]
+rust_type = """
+struct PruningMetadata {
+    pub strategy: String,
+    pub target_sparsity: f32,
+    pub achieved_sparsity: f32,
+}
+"""
+
+[api.CompatibilityInfo]
+rust_type = """
+struct CompatibilityInfo {
+    pub runtime_version: String,        # themql-inference version that produced this artifact
+    pub architecture_version: String,   # model architecture tag (e.g. 'pinn-v1')
+    pub tensor_schema: TensorSchema,
+}
+"""
+[api.TensorSchema]
+rust_type = """
+struct TensorSchema {
+    pub input_shapes: Vec<Vec<usize>>,
+    pub output_shapes: Vec<Vec<usize>>,
+    pub dtype: String,  # 'f32' or 'f64'
+}
+"""
+
+[api.ValidationReport]
+rust_type = """
+struct ValidationReport {
+    pub hash_ok: bool,
+    pub schema_ok: bool,
+    pub compatibility_ok: bool,
+    pub integrity_ok: bool,
+    pub errors: Vec<ArtifactError>,
+}
+"""
+
+[api.RuntimeInfo]
+rust_type = """
+struct RuntimeInfo {
+    pub runtime_version: String,
+    pub architecture_version: String,
+    pub supported_formats: Vec<ModelFormat>,
+}
+"""
+
+[api.ActivationHandle]
+rust_type = """
+struct ActivationHandle {
+    pub model_id: String,
+    pub activated_at: Timestamp,
+}
+"""
+
 [validation_pipeline]
 steps = [
     "hash_verify",

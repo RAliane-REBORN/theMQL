@@ -39,6 +39,19 @@ public_traits = [
     "MqttSubscriber"
 ]
 
+[api.SubscriptionId]
+rust_type = """
+struct SubscriptionId(u64);
+"""
+description = "Opaque handle returned by subscribe(); used to unsubscribe"
+
+[api.MqttQos]
+rust_type = """
+enum MqttQos { AtMostOnce, AtLeastOnce, ExactlyOnce }
+"""
+default = "AtLeastOnce (QoS 1)"
+notes = "Configurable per subject via publish options"
+
 [api.MqttTransport]
 description = "Top-level MQTT transport handle"
 methods = [

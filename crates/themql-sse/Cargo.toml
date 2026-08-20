@@ -12,3 +12,8 @@ path = "src/lib.rs"
 tokio.workspace = true
 themql-core.workspace = true
 themql-message.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
