@@ -1,20 +1,319 @@
 [subsystem]
 name = "telemetry"
 crate = "themql-telemetry"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+First-class telemetry message schema. Telemetry is a Message with
+operation = 'telemetry'. This crate owns the canonical sensor-reading
+structs, the schema version, the sequence-number and timestamp types,
+and the per-sensor reading types. Transports (mqtt, sse, graphql) and
+analysis (polars) and storage (helix-db) consume these types; they must
+not redefine them.
+"""
+
+[references]
+related = [
+    "specs/core.toml",       # Message, Timestamp, Subject, Metadata
+    "specs/mqtt.toml",
+    "specs/sse.toml",
+    "specs/graphql.toml",
+    "specs/analysis.toml",
+    "specs/storage.toml"
+]
 
 [message]
 first_class = true
 schema_versioned = true
 timestamped = true
 sequence_numbered = true
+carried_as = "Message with operation = Operation::Telemetry, payload = Payload::Json(TelemetryMessage)"
 
-[data]
-sensor_values = true
-state_estimate = true
-covariance = true
-controller_state = true
-model_state = true
-diagnostics = true
+# ---------------------------------------------------------------------------
+# Schema version
+# ---------------------------------------------------------------------------
+
+[schema]
+version = 1
+version_field = "schema_version: u16"
+compatibility = "backward-compatible within major; breaking change requires schema version bump"
+
+[sequence]
+type = "u64"
+width = 64
+monotonic_per_source = true
+wrap_at = "u64::MAX (rare; flagged in diagnostics)"
+field = "sequence_number: u64"
+
+[timestamp]
+canonical = "themql_core::Timestamp (re-exported)"
+kind_default = "Monotonic for telemetry"
+
+# ---------------------------------------------------------------------------
+# Public types
+# ---------------------------------------------------------------------------
+
+[api]
+public_types = [
+    "TelemetryMessage",
+    "SensorReading",
+    "SensorKind",
+    "GpsReading",
+    "BarometerReading",
+    "ImuReading",
+    "StateEstimateReading",
+    "CovarianceReading",
+    "ControllerStateReading",
+    "ModelStateReading",
+    "DiagnosticsReading",
+    "TelemetryError"
+]
+
+# ---------------------------------------------------------------------------
+# TelemetryMessage — top-level envelope
+# ---------------------------------------------------------------------------
+
+[api.TelemetryMessage]
+description = "Top-level telemetry envelope. Serialised as the Payload of a Message."
+rust_type = """
+struct TelemetryMessage {
+    schema_version: u16,
+    sequence_number: u64,
+    timestamp: Timestamp,
+    source: Subject,
+    reading: SensorReading,
+}
+"""
+serde = "JSON object with named fields in canonical (deterministic) order"
+
+# ---------------------------------------------------------------------------
+# SensorReading — enum over per-sensor structs
+# ---------------------------------------------------------------------------
+
+[api.SensorReading]
+rust_type = """
+enum SensorReading {
+    Gps(GpsReading),
+    Barometer(BarometerReading),
+    Imu(ImuReading),
+    StateEstimate(StateEstimateReading),
+    Covariance(CovarianceReading),
+    ControllerState(ControllerStateReading),
+    ModelState(ModelStateReading),
+    Diagnostics(DiagnosticsReading),
+}
+"""
+
+[api.SensorKind]
+rust_type = """
+enum SensorKind {
+    Gps,
+    Barometer,
+    Imu,
+}
+"""
+notes = "Used for source tagging and sensor-fusion dispatch; StateEstimate etc. are derived, not raw sensor reads"
+
+# ---------------------------------------------------------------------------
+# Per-sensor structs — NEO-6M GPS
+# ---------------------------------------------------------------------------
+
+[api.GpsReading]
+description = "Reading from NEO-6M GPS. Fix quality flagged; hdop/vdop for uncertainty."
+rust_type = """
+struct GpsReading {
+    fix: GpsFix,
+    latitude_deg: f64,
+    longitude_deg: f64,
+    altitude_m: f64,
+    velocity_north_mps: f64,
+    velocity_east_mps: f64,
+    velocity_down_mps: f64,
+    hdop: f32,
+    vdop: f32,
+    satellites_used: u8,
+}
+"""
+[api.GpsFix]
+rust_type = """
+enum GpsFix {
+    NoFix,
+    TwoD,
+    ThreeD,
+    Dgps,
+    RtkFixed,
+    RtkFloat,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Per-sensor structs — BME280 barometer
+# ---------------------------------------------------------------------------
+
+[api.BarometerReading]
+description = "Reading from BME280 barometer."
+rust_type = """
+struct BarometerReading {
+    pressure_pa: f64,
+    temperature_c: f64,
+    humidity_pct: f32,  // BME280 has humidity; BMP280 does not — for BME280 only
+    altitude_m: f64,   // derived from pressure via standard atmosphere
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Per-sensor structs — GY-LSM6DS3 IMU
+# ---------------------------------------------------------------------------
+
+[api.ImuReading]
+description = "Reading from GY-LSM6DS3 IMU (accelerometer + gyroscope in one package)."
+rust_type = """
+struct ImuReading {
+    accel_x_mps2: f64,
+    accel_y_mps2: f64,
+    accel_z_mps2: f64,
+    gyro_x_radps: f64,
+    gyro_y_radps: f64,
+    gyro_z_radps: f64,
+    temperature_c: f32,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Derived — state estimate (from themql-estimation)
+# ---------------------------------------------------------------------------
+
+[api.StateEstimateReading]
+description = """
+Snapshot of the current EKF state estimate. Produced by
+themql-estimation; serialised here so consumers don't depend on
+estimation internals. Quaternion is [w, x, y, z] (Hamilton convention).
+"""
+rust_type = """
+struct StateEstimateReading {
+    position: [f64; 3],         # [x, y, z] metres
+    velocity: [f64; 3],         # [vx, vy, vz] m/s
+    attitude_quaternion: [f64; 4],  # [w, x, y, z] unit norm
+    angular_velocity: [f64; 3],    # [wx, wy, wz] rad/s
+    accelerometer_bias: [f64; 3],
+    gyroscope_bias: [f64; 3],
+    baro_altitude_bias: f64,
+    gps_clock_bias: f64,
+}
+"""
+
+[api.CovarianceReading]
+description = """
+State estimate covariance (21x21). Serialised as a flat [f64; 441]
+array in row-major order, plus the dimension for forward compat.
+"""
+rust_type = """
+struct CovarianceReading {
+    dimension: u16,           # always 21 for v1
+    values: [f64; 441],       # 21 * 21 row-major
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Derived — controller state (from themql-gnc)
+# ---------------------------------------------------------------------------
+
+[api.ControllerStateReading]
+description = "Snapshot of the active controller's state and latest actuator commands."
+rust_type = """
+struct ControllerStateReading {
+    active_controller: ControllerKind,
+    pid_state: Option<PidState>,
+    lqri_state: Option<LqriState>,
+    actuator_commands: [f64; 8],  # fixed-size actuator vector; unused slots are 0.0
+}
+"""
+[api.ControllerKind]
+rust_type = """
+enum ControllerKind { Pid, Lqri, Hybrid }
+"""
+[api.PidState]
+rust_type = """
+struct PidState {
+    setpoint: [f64; 3],
+    measured: [f64; 3],
+    error: [f64; 3],
+    integral: [f64; 3],
+    derivative: [f64; 3],
+    output: [f64; 3],
+}
+"""
+[api.LqriState]
+rust_type = """
+struct LqriState {
+    state: [f64; 21],   # copy of StateEstimateReading for controller input
+    control: [f64; 8],  # actuator commands
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Derived — model state (from themql-inference)
+# ---------------------------------------------------------------------------
+
+[api.ModelStateReading]
+description = "Snapshot of the currently-active ML model and inference budget."
+rust_type = """
+struct ModelStateReading {
+    model_id: String,
+    model_version: String,
+    active: bool,
+    resource_budget: ResourceBudgetSummary,
+    last_inference_latency_ns: u64,
+    rollback_engaged: bool,
+}
+"""
+[api.ResourceBudgetSummary]
+rust_type = """
+struct ResourceBudgetSummary {
+    cpu_budget_pct: u8,
+    memory_budget_bytes: u64,
+    inference_deadline_ms: u16,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+[api.DiagnosticsReading]
+rust_type = """
+struct DiagnosticsReading {
+    level: DiagnosticLevel,
+    code: String,
+    message: String,
+    source: Subject,
+    details: Option<serde_json::Value>,
+}
+"""
+[api.DiagnosticLevel]
+rust_type = """
+enum DiagnosticLevel { Info, Warn, Error, Critical }
+"""
+
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
+
+[api.TelemetryError]
+rust_type = """
+enum TelemetryError {
+    SchemaVersionUnsupported { got: u16, supported: u16 },
+    SequenceOverflow,
+    SerializationError(String),
+    UnknownSensorKind(String),
+}
+"""
+mapping_to_core_error = "TelemetryError -> themql_core::Error::validation_error or internal_error"
+
+# ---------------------------------------------------------------------------
+# Sources / transports / analysis / storage
+# ---------------------------------------------------------------------------
 
 [sources]
 gps = "NEO-6M"
@@ -35,3 +334,9 @@ helixdb = true
 [constraints]
 telemetry_schema_is_canonical = true
 transport_must_not_redefine_telemetry = true
+analysis_must_not_redefine_telemetry = true
+storage_must_not_redefine_telemetry = true
+schema_version_must_be_explicit = true
+sequence_number_must_be_monotonic_per_source = true
+timestamp_must_use_canonical_type = true
+covariance_dimension_pinned_at_21 = true

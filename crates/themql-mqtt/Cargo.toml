@@ -13,3 +13,8 @@ embassy-executor.workspace = true
 embassy-sync.workspace = true
 themql-core.workspace = true
 themql-message.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

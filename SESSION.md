@@ -6,58 +6,79 @@ standing rules). When a session ends, fold the in-flight items into
 
 ## Current session
 
-- Date: 2026-08-19
+- Date: 2026-08-20
 - Mode: build
 - Agent: opencode (glm-5.2:cloud)
+- Branch: `feat/phase-1-spec-deepening` (stacked on
+  `feat/v0.1-spec-and-workspace-skeleton`, PR #1 open)
 
 ## Just-completed turn
 
-Hardened the build toolchain and codified the NASA JPL Power of Ten rules.
+Phase 1 complete. Three stages:
 
-Files created this turn:
+1. **nalgebra amendment** — nalgebra 0.35 replaces ndarray for non-ML
+   numerics (EKF, covariance, quaternion, rotation, linear algebra).
+   ndarray demoted to raw ML-side buffers only. Updated SYSTEM.md,
+   ARCHITECT.md, SPEC.toml, Cargo.toml, AGENTS.md, MEMORY.md.
+2. **Stage 1 — spec deepening** — deepened ALL 19 specs from thin/medium
+   to deep with concrete types/traits/signatures. User decisions applied:
+   Selection = filter + projection combined (core.toml); TWO separate
+   runtime traits DesktopRuntime + EmbeddedRuntime, no shared trait
+   (runtime.toml); EstimatorState = 21-dim (state_estimation.toml).
+3. **Stage 2 — all 19 crates implemented** — each crate now has real Rust
+   types/traits + unit tests. See CHANGELOG.md 2026-08-20 for the per-crate
+   breakdown.
 
-- `.cargo/config.toml` — mold linker + sccache wrapper configs (opt-in via
-  comments). Cargo aliases.
-- `deny.toml` — cargo-deny config (licenses, advisories, bans, sources).
-- `TETANUS.md` — NASA JPL Power of Ten adapted for Rust, with enforcement.
-
-Files modified this turn:
-
-- `rust-toolchain.toml` — added components (rustfmt, clippy, rust-src, miri)
-  and embedded targets (thumbv7em, riscv32imc).
-- `Cargo.toml` — added `[profile.dev]`, `[profile.release]`, `[profile.bench]`.
-- `AGENTS.md` — added safety-critical validation section (cargo deny, machete,
-  bloat, miri), TETANUS.md summary (10 rules), updated TOML file count,
-  updated workspace crate count, updated dependency names.
-- Living docs: MEMORY, CHANGELOG, SESSION, HANDOVER, AGENTS_SYNC, README,
-  SECURITY, BUGS.
+Files touched this turn: prompts/SYSTEM.md, prompts/ARCHITECT.md,
+SPEC.toml, Cargo.toml, AGENTS.md, all 19 specs/*.toml, all 19
+crates/themql-*/{Cargo.toml,src/*}, + 8 living docs.
 
 ## State of the repository
 
-- v0.1 spec drop + living-docs + AGENTS.md + subsystem spec set + Phase 1 dep
-  wiring + toolchain hardening all landed.
-- 19 crates, 43 TOML files, all parsing.
-- `cargo check --workspace` passes for all 19 crates with real deps.
-- Build toolchain config in place: rust-toolchain.toml (components + targets),
-  .cargo/config.toml (mold/sccache opt-in), deny.toml (cargo-deny),
-  TETANUS.md (Power of 10).
-- Working tree has uncommitted changes across all turns. Not yet committed.
-- No real Rust source beyond 0-line stubs — Phase 1 proper.
+- v0.1 spec + workspace skeleton + toolchain hardening + Phase 1 complete.
+- ALL 19 crates now have real `src/` content (traits + types + error types +
+  unit tests). No 0-line stubs remain.
+- 183 unit tests + 1 doc test = 184 tests, all pass.
+- Full validation green:
+  - `cargo fmt --all --check` — clean.
+  - `cargo check --workspace` — passes for all 19 crates.
+  - `cargo clippy --workspace --all-targets -- -D warnings` — zero warnings.
+  - `cargo test --workspace` — 184 tests pass.
+  - `python3 tomllib` — all TOML files parse.
+  - `cargo metadata --no-deps` — resolves.
+- The four safety-critical crates (gnc, estimation, inference, artifact)
+  comply with TETANUS.md (forbid(unsafe_code), deny(warnings),
+  clippy::pedantic, no recursion, fixed loop bounds, no heap alloc after
+  init where required, functions <= 60 lines, >= 2 assertions per function,
+  no unwrap()/expect() in non-test code). nalgebra 0.35 used for all non-ML
+  numerics. `tch` deliberately not added to inference (libtorch build dep);
+  the InferenceEngine trait is defined without it.
+- New workspace deps added: nalgebra 0.35, uuid 1 (v7+serde), blake3 1,
+  thiserror 2, serde-big-array 0.5.
+- Working tree has uncommitted changes. Not yet committed.
 
 ## In-flight work
 
-None. The toolchain hardening is complete.
+None. Phase 1 is complete.
 
 ## Next plausible actions (suggestions, not commitments)
 
 1. Commit the work (user has not requested commits yet).
-2. Begin Phase 1: real `src/lib.rs` content in `themql-core` (Message, Query,
-   Response, Error, Context types) with tests.
-3. Install mold + sccache + cargo-deny + cargo-machete + cargo-bloat and run
-   the full safety-critical validation gate.
-4. Add a CI guard script (TOML parse + crate-name-vs-workspace invariant).
-5. Reassess `cachelito` (proc-macro for function caching) vs the L1 use case.
-6. Reassess `valkey` (alpha) stability for production use.
+2. Implement full nonlinear quaternion EKF dynamics + Jacobian-based
+   Kalman gain in themql-estimation (v0.1 uses simplified identity-gain
+   updates as a placeholder).
+3. Wire a real SHA-256 (or BLAKE3) into themql-artifact's HashValidator
+   (v0.1 uses a placeholder fold hash — must replace before deployment).
+4. Add a real `tch`-backed `InferenceEngine` impl in themql-inference once
+   libtorch is available in the build env.
+5. Reconcile CacheKey (defined locally in themql-cache) with themql-query's
+   CacheKeyer — do not duplicate the key type silently.
+6. Wire heavy deps (tch, polars, dioxus, ratatui, embassy) into the
+   training/analysis/desktop/embedded crates behind the trait surfaces.
+7. Install cargo-deny, cargo-machete, cargo-bloat, sccache, mold; run the
+   safety-critical validation gate.
+8. Add a CI guard script (TOML parse + crate-name-vs-workspace invariant).
+9. Write `opencode.json`.
 
 ## Open questions / blockers
 

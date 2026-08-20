@@ -2,45 +2,285 @@
 name = "gnc"
 crate = "themql-gnc"
 domain = "embedded"
+safety_critical = true
+tetanus = true
+
+[purpose]
+description = """
+Guidance, Navigation, and Control for the embedded target. Deterministic
+PID, LQRI, and hybrid LQRI-PID controllers operating on quaternion
+attitude state. ML has NO control authority here; basic flight stability
+must hold without ML (per SPEC.toml [ml.authority]).
+"""
+
+[references]
+related = [
+    "specs/state_estimation.toml",  # state vector input
+    "specs/inference.toml",         # ML-assisted correction is augmentative only
+    "specs/telemetry.toml"          # ControllerStateReading output
+]
 
 [architecture]
 guidance = true
 navigation = true
 control = true
 
+# ---------------------------------------------------------------------------
+# State — 21-dim (matches state_estimation.toml)
+# ---------------------------------------------------------------------------
+
 [state]
 attitude_representation = "quaternion"
 position_representation = "cartesian"
 velocity_representation = "cartesian"
+dimension = 21
+layout = """
+position: [f64; 3]            # [x, y, z] metres
+velocity: [f64; 3]            # [vx, vy, vz] m/s
+attitude_quaternion: [f64; 4] # [w, x, y, z] Hamilton, unit norm
+angular_velocity: [f64; 3]    # [wx, wy, wz] rad/s
+accelerometer_bias: [f64; 3]
+gyroscope_bias: [f64; 3]
+baro_altitude_bias: f64
+gps_clock_bias: f64
+"""
+
+[api.GncState]
+rust_type = """
+struct GncState {
+    pub position: nalgebra::Vector3<f64>,
+    pub velocity: nalgebra::Vector3<f64>,
+    pub attitude: nalgebra::UnitQuaternion<f64>,
+    pub angular_velocity: nalgebra::Vector3<f64>,
+    pub accelerometer_bias: nalgebra::Vector3<f64>,
+    pub gyroscope_bias: nalgebra::Vector3<f64>,
+    pub baro_altitude_bias: f64,
+    pub gps_clock_bias: f64,
+}
+"""
+notes = """
+Uses nalgebra::UnitQuaternion<f64> for attitude — guarantees unit norm
+at the type level (the type-system enforces the invariant). Conversion
+to raw [f64; 4] for telemetry serialisation via .coords / .w.
+"""
+construction = "GncState::new() returns a zero-state; from_estimation(state: &EstimatorState) converts"
+clone = "GncState is Clone + Copy where nalgebra types allow; otherwise Clone"
+
+# ---------------------------------------------------------------------------
+# Controllers
+# ---------------------------------------------------------------------------
 
 [controllers]
 pid = true
 lqri = true
 hybrid_lqri_pid = true
+trait = "Controller"
+switching_policy_explicit = true
+
+[api.Controller]
+description = """
+Top-level controller trait. Each controller takes the current state and
+a setpoint and produces an ActuatorCommand. Controllers are
+deterministic; no ML inside.
+"""
+rust_type = """
+trait Controller: Send + Sync {
+    fn step(&self, state: &GncState, setpoint: &Setpoint, dt: f64) -> Result<ActuatorCommand, GncError>;
+    fn kind(&self) -> ControllerKind;
+}
+"""
+signature = "fn step(&self, state: &GncState, setpoint: &Setpoint, dt: f64) -> Result<ActuatorCommand, GncError>"
+notes = "Sync function (not async) — GNC runs in a hard real-time loop; no I/O"
+
+[api.Setpoint]
+rust_type = """
+struct Setpoint {
+    pub target_position: nalgebra::Vector3<f64>,
+    pub target_velocity: nalgebra::Vector3<f64>,
+    pub target_attitude: nalgebra::UnitQuaternion<f64>,
+    pub target_angular_velocity: nalgebra::Vector3<f64>,
+}
+"""
+
+[api.ActuatorCommand]
+rust_type = """
+struct ActuatorCommand {
+    pub values: [f64; 8],  # fixed 8-channel actuator vector; unused slots are 0.0
+}
+"""
+constraints = ["fixed 8 channels at compile time", "unused slots must be 0.0 (not NaN)"]
+
+[api.ControllerKind]
+rust_type = """
+enum ControllerKind { Pid, Lqri, Hybrid }
+"""
+
+# ---------------------------------------------------------------------------
+# PID
+# ---------------------------------------------------------------------------
 
 [pid]
 enabled = true
 deterministic = true
 
+[api.PidGains]
+rust_type = """
+struct PidGains {
+    pub kp: [f64; 3],
+    pub ki: [f64; 3],
+    pub kd: [f64; 3],
+}
+"""
+constraints = ["gains are fixed at construction; no runtime retuning without re-construct"]
+
+[api.PidController]
+rust_type = """
+struct PidController {
+    gains: PidGains,
+    integral: [f64; 3],
+    prev_error: [f64; 3],
+}
+"""
+methods = [
+    "fn new(gains: PidGains) -> Self",
+    "fn step(&self, state: &GncState, setpoint: &Setpoint, dt: f64) -> Result<ActuatorCommand, GncError>"
+]
+notes = "Implements Controller. Integral windup bounded by saturating integral term at ±MAX_INTEGRAL"
+
+# ---------------------------------------------------------------------------
+# LQRI
+# ---------------------------------------------------------------------------
+
 [lqri]
 enabled = true
 deterministic = true
+
+[api.LqriMatrices]
+rust_type = """
+struct LqriMatrices {
+    pub K: nalgebra::SMatrix<f64, 8, 21>,  # state feedback gain: 8 actuators x 21 state
+    pub Ki: nalgebra::SMatrix<f64, 8, 3>,  # integral action on tracking error (3 axes)
+    pub Q: nalgebra::SMatrix<f64, 21, 21>, # state cost
+    pub R: nalgebra::SMatrix<f64, 8, 8>,   # control cost
+}
+"""
+constraints = ["matrices fixed at construction; computed offline", "dimensions pinned at compile time (21, 8)"]
+
+[api.LqriController]
+rust_type = """
+struct LqriController {
+    matrices: LqriMatrices,
+    integral_state: nalgebra::Vector3<f64>,
+}
+"""
+methods = [
+    "fn new(matrices: LqriMatrices) -> Self",
+    "fn step(&self, state: &GncState, setpoint: &Setpoint, dt: f64) -> Result<ActuatorCommand, GncError>"
+]
+
+# ---------------------------------------------------------------------------
+# Hybrid LQRI-PID
+# ---------------------------------------------------------------------------
 
 [hybrid]
 enabled = true
 deterministic = true
 switching_policy_explicit = true
 
+[api.HybridSwitchingPolicy]
+rust_type = """
+enum HybridSwitchingPolicy {
+    AlwaysPid,                       # degenerate; effectively PidController
+    AlwaysLqri,                      # degenerate; effectively LqriController
+    LqriWithPidFallback(PidGains),   # LQRI primary; PID fallback on LQRI saturation
+    PidWithLqriOuter(LqriMatrices),  # PID inner; LQRI outer-loop setpoint generation
+    Schedule(fn(GncState) -> ControllerKind),  # explicit state-dependent switch (function pointer)
+}
+"""
+notes = """
+Schedule variant holds a function pointer, NOT a closure, per TETANUS
+rule 9 (function pointers discouraged but allowed; closures with captured
+state are not — they could allocate). The schedule function must be a
+pure function of state; no hidden state.
+"""
+
+[api.HybridController]
+rust_type = """
+struct HybridController {
+    policy: HybridSwitchingPolicy,
+    pid: PidController,
+    lqri: LqriController,
+}
+"""
+methods = [
+    "fn new(policy: HybridSwitchingPolicy, pid: PidController, lqri: LqriController) -> Self",
+    "fn step(&self, state: &GncState, setpoint: &Setpoint, dt: f64) -> Result<ActuatorCommand, GncError>"
+]
+notes = "step() applies the policy to pick a controller, then delegates"
+
+# ---------------------------------------------------------------------------
+# Safety
+# ---------------------------------------------------------------------------
+
 [safety]
 ml_control_authority = false
 deterministic_fallback = true
 controller_health_monitoring = true
 
+[safety.invariants]
+basic_flight_stability_without_ml = true
+ml_may_not_silently_replace_controller = true
+controller_failure_must_be_detectable = true
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
 [numerics]
-ndarray_allowed = true
+library = "nalgebra"
+quaternion_type = "nalgebra::UnitQuaternion<f64>"
+matrix_type = "nalgebra::SMatrix<f64, R, C>"
+vector_type = "nalgebra::Vector3<f64> / SVector<f64, N>"
+ndarray_allowed = false  # per spec amendment 2026-08-19 — nalgebra for non-ML numerics
 tch_rs_in_control_loop = false
 
-[constraints]
-euler_angles_in_control_loop = false
-gimbal_lock_prone_representation = false
-implicit_controller_switching = false
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
+
+[api.GncError]
+rust_type = """
+enum GncError {
+    StateInvalid { reason: String },
+    QuaternionNotUnitNorm { norm: f64 },
+    ActuatorSaturation,
+    DtnotPositive { dt: f64 },
+    SetpointInvalid { reason: String },
+    InternalError(String),
+}
+"""
+mapping_to_core_error = "GncError -> themql_core::Error::internal_error"
+
+# ---------------------------------------------------------------------------
+# TETANUS compliance
+# ---------------------------------------------------------------------------
+
+[tetanus]
+applies = true
+rules_enforced = [
+    "no recursion",
+    "fixed loop bounds (all for-loops over fixed-size arrays)",
+    "no heap allocation after init (PidController, LqriController, HybridController pre-allocated)",
+    "functions <= 60 lines",
+    ">= 2 assertions per function",
+    "smallest possible scope for data objects",
+    "check all Result return values; no unwrap()/expect()",
+    "simple macros only; no recursive macro_rules",
+    "one level of pointer dereference; no **T",
+    "zero warnings at clippy::pedantic + deny(warnings)"
+]
+notes = """
+GncState uses nalgebra fixed-size types (SMatrix, SVector, UnitQuaternion)
+which are stack-allocated — no heap. Controller structs hold
+pre-allocated integral/state buffers; step() is allocation-free.
+"""

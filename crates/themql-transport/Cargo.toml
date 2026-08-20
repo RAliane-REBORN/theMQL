@@ -4,4 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "themql_transport"
+path = "src/lib.rs"
+
 [dependencies]
+themql-core.workspace = true
+themql-message.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

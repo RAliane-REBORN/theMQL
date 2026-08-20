@@ -2,17 +2,33 @@
 name = "training"
 crate = "themql-training"
 domain = "desktop"
+safety_critical = false
+tetanus = false
 
 [purpose]
 description = """
 Desktop-only model creation: training, fine tuning, pruning,
 sparsification, and artifact generation. Models are exported as
-validated artifacts for the embedded inference crate.
+validated artifacts for the embedded inference crate via
+themql-artifact.
 """
+
+[references]
+related = [
+    "specs/model_artifact.toml",  # artifact emission
+    "specs/analysis.toml",         # dataset generation via polars
+    "specs/telemetry.toml"        # training data source
+]
 
 [framework]
 primary_tensor_framework = "tch-rs"
+primary_tensor_crate = "tch"
 secondary_numeric_framework = "ndarray"
+notes = "tch published as `tch` on crates.io. ndarray for raw ML-side array buffers only."
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
 
 [capabilities]
 dense_training = true
@@ -29,9 +45,184 @@ enabled = true
 dense_training = true
 physics_constraints = true
 
+# ---------------------------------------------------------------------------
+# Trainer trait
+# ---------------------------------------------------------------------------
+
+[api.Trainer]
+description = """
+Top-level training trait. train() consumes a Dataset and a config and
+produces a TrainedModel. The model is then handed to themql-artifact
+for validation + serialization.
+"""
+rust_type = """
+trait Trainer: Send + Sync {
+    async fn train(&self, dataset: &Dataset, config: &TrainingConfig) -> Result<TrainedModel, TrainingError>;
+    fn kind(&self) -> TrainerKind;
+}
+"""
+methods = [
+    "train — async (desktop; may take minutes/hours; runs on tokio + rayon)",
+    "kind — returns the trainer variant (Dense, Pinn, GradientBoosting, FineTuning)"
+]
+
+[api.TrainerKind]
+rust_type = """
+enum TrainerKind { Dense, Pinn, GradientBoosting, FineTuning }
+"""
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+
+[api.Dataset]
+description = """
+Training dataset. Built from telemetry via polars; held as a polars
+DataFrame on desktop. Embedded never sees this type.
+"""
+rust_type = """
+struct Dataset {
+    pub features: polars::prelude::DataFrame,
+    pub labels: polars::prelude::DataFrame,
+    pub feature_schema: FeatureSchema,
+}
+"""
+serde = "not serialised directly; exported via ArtifactWriter as part of metadata"
+
+[api.FeatureSchema]
+rust_type = """
+struct FeatureSchema {
+    pub features: Vec<FeatureSpec>,
+    pub normalization: NormalizationSpec,
+}
+struct FeatureSpec {
+    pub name: String,
+    pub dtype: FeatureDType,
+    pub shape: Vec<usize>,
+}
+enum FeatureDType { F32, F64, I64, Bool }
+enum NormalizationSpec { None, Standard, MinMax, Custom(String) }
+"""
+
+# ---------------------------------------------------------------------------
+# TrainingConfig
+# ---------------------------------------------------------------------------
+
+[api.TrainingConfig]
+rust_type = """
+struct TrainingConfig {
+    pub kind: TrainerKind,
+    pub epochs: u32,
+    pub batch_size: u32,
+    pub learning_rate: f64,
+    pub weight_decay: Option<f64>,
+    pub early_stopping: Option<EarlyStoppingConfig>,
+    pub pruning: Option<PruningConfig>,
+    pub sparsification: Option<SparsificationConfig>,
+}
+"""
+[api.EarlyStoppingConfig]
+rust_type = """
+struct EarlyStoppingConfig {
+    pub patience: u32,
+    pub min_delta: f64,
+    pub metric: String,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Pruning + sparsification
+# ---------------------------------------------------------------------------
+
+[api.PruningConfig]
+rust_type = """
+struct PruningConfig {
+    pub strategy: PruningStrategy,
+    pub target_sparsity: f32,
+}
+enum PruningStrategy { Magnitude, Structured, LotteryTicket }
+"""
+
+[api.SparsificationConfig]
+rust_type = """
+struct SparsificationConfig {
+    pub strategy: SparsificationStrategy,
+    pub target_sparsity: f32,
+}
+enum SparsificationStrategy { Quantization { bits: u8 }, Distillation }
+"""
+
+# ---------------------------------------------------------------------------
+# TrainedModel — output of Trainer, input to ArtifactWriter
+# ---------------------------------------------------------------------------
+
+[api.TrainedModel]
+description = """
+The model produced by a Trainer. Handed to themql-artifact::ArtifactWriter
+which serialises it into a ModelArtifact with hash + metadata. The shape
+of TrainedModel is intentionally opaque to non-training crates — only
+themql-artifact and themql-training know it.
+"""
+rust_type = """
+struct TrainedModel {
+    pub model_bytes: Vec<u8>,           # serialised tch model (TorchScript or safetensors)
+    pub format: ModelFormat,
+    pub feature_schema: FeatureSchema,
+    pub validation_metrics: ValidationMetrics,
+}
+enum ModelFormat { TorchScript, SafeTensors, Onnx }
+"""
+[api.ValidationMetrics]
+rust_type = """
+struct ValidationMetrics {
+    pub loss: f64,
+    pub accuracy: Option<f64>,
+    pub custom: BTreeMap<String, f64>,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
+
+[api.TrainingError]
+rust_type = """
+enum TrainingError {
+    DatasetInvalid(String),
+    ConfigInvalid(String),
+    Diverged { epoch: u32, loss: f64 },
+    PruningFailed(String),
+    SparsificationFailed(String),
+    ArtifactEmissionFailed(ArtifactError),
+    InternalError(String),
+}
+"""
+mapping_to_core_error = "TrainingError -> themql_core::Error::internal_error"
+notes = "ArtifactError re-exported from themql-artifact"
+
+# ---------------------------------------------------------------------------
+# Numerics
+# ---------------------------------------------------------------------------
+
 [numerics]
-tch_rs_allowed = true
-ndarray_for_conventional_linear_algebra = true
+tensor_library = "tch"
+ml_side_buffers = "ndarray"
+conventional_algebra = "nalgebra"  # if training needs EKF-style ops (e.g. PINN physics loss)
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+[lifecycle]
+load_data = "polars DataFrame loaded from telemetry storage (helix-db) or CSV/Parquet"
+build_dataset = "feature engineering via themql-analysis + polars"
+train = "Trainer::train produces TrainedModel"
+emit_artifact = "ArtifactWriter::write(model, metadata) -> ModelArtifact"
+validate_artifact = "ArtifactValidator::validate(artifact) before transfer to embedded"
+
+[numerics.tch_rs]
+allowed = true
+notes = "tch_rs_allowed = true; this is the desktop training crate"
 
 [deployment]
 desktop_only = true
@@ -50,3 +241,4 @@ unvalidated_model_export = false
 model_schema_bypass = false
 validation_bypass = false
 ml_required_for_basic_flight = false
+training_crate_does_not_depend_on_inference = true

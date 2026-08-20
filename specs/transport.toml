@@ -7,8 +7,8 @@ domain = "cross-cutting"
 description = """
 Cross-cutting transport specification. Per-transport detail lives in
 subordinate specs (mqtt.toml, graphql.toml, sse.toml). This file defines
-the principle, the bridge table, and the cross-cutting constraints that
-all transports must obey.
+the principle, the bridge trait, the bridge routing function, and the
+cross-cutting constraints that all transports must obey.
 """
 
 [references]
@@ -23,6 +23,11 @@ transport_is_projection = true
 transport_is_not_semantic_owner = true
 transport_contains_business_logic = false
 
+# ---------------------------------------------------------------------------
+# Bridge — a Message emitted on one transport can be re-published on another.
+# Bridge route is via themql-core Message; never adapter-to-adapter.
+# ---------------------------------------------------------------------------
+
 [bridges]
 mqtt_to_graphql = true
 graphql_to_mqtt = true
@@ -34,8 +39,74 @@ one_internal_model = true
 no_cross_adapter_direct_coupling = true
 bridge_route = "via themql-core Message, never adapter-to-adapter"
 
+[api]
+public_types = [
+    "Bridge",
+    "BridgeRoute",
+    "TransportError"
+]
+
+[api.Bridge]
+description = """
+A bridge re-publishes a Message received on one transport onto another
+transport. Bridges hold no business logic; they translate Message →
+transport-specific publish call. Routing is by Subject, not by
+adapter-specific types.
+"""
+rust_type = """
+trait Bridge: Send + Sync {
+    async fn route(&self, msg: &Message, source: TransportKind, targets: &[TransportKind]) -> Result<(), TransportError>;
+}
+"""
+methods = [
+    "route — given a Message from source transport, publish it on each target transport"
+]
+
+[api.BridgeRoute]
+description = """
+Describes a static route: messages on `source_subject_pattern` get
+forwarded from `source` transport to `target` transport with optional
+subject rewrite.
+"""
+rust_type = """
+struct BridgeRoute {
+    source: TransportKind,
+    target: TransportKind,
+    source_pattern: SubjectPattern,
+    target_subject: Option<Subject>,  // None = preserve original subject
+    rewrite: Option<SubjectRewrite>,
+}
+enum SubjectRewrite {
+    Prefix(Subject),
+    Replace(Subject),
+}
+"""
+
+[api.TransportKind]
+rust_type = """
+enum TransportKind {
+    Mqtt,
+    Graphql,
+    Sse,
+}
+"""
+
+[api.TransportError]
+rust_type = """
+enum TransportError {
+    SourceClosed,
+    TargetPublishFailed(String),
+    SubjectRewriteFailed(String),
+    SerializationError(String),
+    LoopbackForbidden,  // a bridge may not route a message back to its source transport
+}
+"""
+mapping_to_core_error = "TransportError -> themql_core::Error::transport_error"
+
 [constraints]
 business_logic_in_transport = false
 duplicate_routing_logic = false
 transport_specific_domain_model = false
 transport_types_must_not_escape_adapter = true
+bridge_loopback_forbidden = true  # a Bridge must not re-publish on the same transport the message arrived on
+bridge_holds_no_business_logic = true
