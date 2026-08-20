@@ -161,6 +161,7 @@ async fn dispatch(command: &Command) -> Result<(), themql_core::Error> {
 /// Stub resolver for the serve subcommand — returns the subject as JSON.
 struct DesktopResolver;
 
+#[allow(clippy::unused_async_trait_impl)]
 impl themql_core::ResolverBoxed for DesktopResolver {
     async fn resolve(
         &self,
@@ -255,13 +256,15 @@ impl themql_core::MessageHandler for MqttToSseBridge {
 /// SSE (GET /events) on the same axum router. When `--enable-mqtt` is
 /// set, an MQTT-to-SSE bridge forwards incoming MQTT messages on
 /// `vehicle.events` to the SSE publisher. When `--enable-auth` is set,
-/// `better-auth` session auth routes are mounted at `/api/auth/*`.
+/// `better-auth` session auth routes are mounted at `/api/auth/*` and
+/// GraphQL field guards are activated with a default `Admin` role.
+/// MQTT ACLs are applied based on the `--mqtt-username` role mapping.
 #[allow(clippy::too_many_lines)]
 async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
     use better_auth::handlers::axum::AxumIntegration;
     use std::sync::Arc;
     use themql_graphql::{
-        DispatchBridgeImpl, GraphqlResolverBridgeImpl, GraphqlSchema, GraphqlSchemaImpl,
+        AuthRole, DispatchBridgeImpl, GraphqlResolverBridgeImpl, GraphqlSchema, GraphqlSchemaImpl,
         MutationRoot, QueryRoot, SubscriptionRoot,
     };
     use themql_sse::TokioSsePublisher;
@@ -275,10 +278,11 @@ async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
     let source: Arc<dyn themql_graphql::GraphqlSubscriptionSource> =
         Arc::clone(&publisher) as Arc<dyn themql_graphql::GraphqlSubscriptionSource>;
 
-    let schema = GraphqlSchemaImpl::new(
+    let schema = GraphqlSchemaImpl::with_role(
         QueryRoot::new(bridge),
         MutationRoot::new(dispatch),
         SubscriptionRoot::with_source(source),
+        AuthRole::Admin,
     );
 
     let sse_subject = themql_core::Subject::from_str("vehicle.events")
@@ -333,6 +337,12 @@ async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
         );
         if let (Some(u), Some(p)) = (&args.mqtt_username, &args.mqtt_password) {
             mqtt_config = mqtt_config.with_credentials(u, p);
+            let acl = match u.as_str() {
+                "operator" => themql_mqtt::operator_acl(),
+                "observer" => themql_mqtt::observer_acl(),
+                _ => themql_mqtt::admin_acl(),
+            };
+            mqtt_config = mqtt_config.with_acl(acl);
         }
         let transport = Arc::new(themql_mqtt::RumqttcTransport::new(&mqtt_config));
         let bridge_publisher = Arc::clone(&publisher);
@@ -874,5 +884,29 @@ mod tests {
             .build()
             .await;
         assert!(auth.is_ok());
+    }
+
+    #[test]
+    fn mqtt_acl_maps_username_to_role() {
+        let admin_acl = themql_mqtt::admin_acl();
+        assert!(admin_acl.permits(themql_mqtt::AclAction::Publish, "system.config"));
+        assert!(admin_acl.permits(themql_mqtt::AclAction::Subscribe, "anything"));
+
+        let op_acl = themql_mqtt::operator_acl();
+        assert!(op_acl.permits(themql_mqtt::AclAction::Publish, "vehicle.events"));
+        assert!(!op_acl.permits(themql_mqtt::AclAction::Publish, "system.config"));
+
+        let obs_acl = themql_mqtt::observer_acl();
+        assert!(obs_acl.permits(themql_mqtt::AclAction::Subscribe, "vehicle.events"));
+        assert!(!obs_acl.permits(themql_mqtt::AclAction::Publish, "vehicle.events"));
+    }
+
+    #[test]
+    fn graphql_auth_role_hierarchy() {
+        use themql_graphql::AuthRole;
+        assert!(AuthRole::Admin.satisfies(AuthRole::Operator));
+        assert!(AuthRole::Admin.satisfies(AuthRole::Observer));
+        assert!(AuthRole::Operator.satisfies(AuthRole::Observer));
+        assert!(!AuthRole::Observer.satisfies(AuthRole::Operator));
     }
 }

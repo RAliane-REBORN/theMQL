@@ -22,6 +22,13 @@
 #![warn(missing_docs)]
 #![allow(non_snake_case)]
 #![allow(clippy::doc_markdown)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::string::ToString;
+use core::fmt;
 
 use nalgebra::{SMatrix, UnitQuaternion, Vector3};
 use thiserror::Error;
@@ -188,6 +195,7 @@ pub enum GncError {
     InternalError(String),
 }
 
+#[cfg(feature = "std")]
 impl From<GncError> for themql_core::Error {
     fn from(e: GncError) -> Self {
         themql_core::Error::internal_error(e.to_string())
@@ -453,8 +461,8 @@ pub enum HybridSwitchingPolicy {
     Schedule(fn(GncState) -> ControllerKind),
 }
 
-impl std::fmt::Debug for HybridSwitchingPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for HybridSwitchingPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlwaysPid => f.write_str("AlwaysPid"),
             Self::AlwaysLqri => f.write_str("AlwaysLqri"),
@@ -474,9 +482,9 @@ impl PartialEq for HybridSwitchingPolicy {
             (Self::LqriWithPidFallback(a), Self::LqriWithPidFallback(b)) => a == b,
             (Self::PidWithLqriOuter(_), Self::PidWithLqriOuter(_)) => true,
             (Self::Schedule(a), Self::Schedule(b)) => {
-                let pa: *const () = std::ptr::from_ref(a).cast();
-                let pb: *const () = std::ptr::from_ref(b).cast();
-                std::ptr::eq(pa, pb)
+                let pa: *const () = core::ptr::from_ref(a).cast();
+                let pb: *const () = core::ptr::from_ref(b).cast();
+                core::ptr::eq(pa, pb)
             }
             _ => false,
         }

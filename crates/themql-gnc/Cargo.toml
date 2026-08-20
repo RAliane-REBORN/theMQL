@@ -8,7 +8,11 @@ license.workspace = true
 name = "themql_gnc"
 path = "src/lib.rs"
 
+[features]
+default = ["std"]
+std = ["dep:themql-core", "thiserror/std"]
+
 [dependencies]
-themql-core.workspace = true
-nalgebra.workspace = true
-thiserror.workspace = true
+themql-core = { workspace = true, optional = true }
+nalgebra = { version = "0.35", default-features = false, features = ["libm"] }
+thiserror = { version = "2", default-features = false }

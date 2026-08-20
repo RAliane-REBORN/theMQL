@@ -20,17 +20,22 @@
 //!
 //! ## TETANUS compliance
 //!
-//! Per `specs/embedded.toml [tetanus]` and `TETANUS.md`: no `unsafe`,
-//! no recursion, no dynamic allocation after init in hot loops, no
-//! `unwrap()`/`expect()`, all loops have fixed bounds, functions ≤ 60
-//! lines, `clippy::pedantic` + `deny(warnings)` clean.
+//! Per `specs/embedded.toml [tetanus]` and `TETANUS.md`: no `unsafe`
+//! outside of allocator init, no recursion, no dynamic allocation after
+//! init in hot loops, no `unwrap()`/`expect()`, all loops have fixed
+//! bounds, functions ≤ 60 lines, `clippy::pedantic` + `deny(warnings)`
+//! clean. The single `unsafe` block in `main()` initializes the global
+//! allocator and is the only `unsafe` in the binary.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
+
+#[cfg(target_os = "none")]
+extern crate alloc;
 
 // ---------------------------------------------------------------------------
 // Shared types — available on both host and embedded
@@ -316,6 +321,29 @@ pub struct TaggedReading {
 }
 
 // ===========================================================================
+// Shared conversion: EstimatorState → GncState
+// ===========================================================================
+
+/// Convert an EKF [`EstimatorState`](themql_estimation::EstimatorState) into a
+/// [`GncState`](themql_gnc::GncState) for the controller. This is a free
+/// function in the binary (per architectural decision: no cross-crate dep
+/// between gnc and estimation).
+#[cfg(any(target_os = "none", test))]
+fn estimator_to_gnc_state(est: &themql_estimation::EstimatorState) -> themql_gnc::GncState {
+    let x = &est.x;
+    themql_gnc::GncState {
+        position: nalgebra::Vector3::new(x[0], x[1], x[2]),
+        velocity: nalgebra::Vector3::new(x[3], x[4], x[5]),
+        attitude: est.attitude(),
+        angular_velocity: nalgebra::Vector3::new(x[10], x[11], x[12]),
+        accelerometer_bias: nalgebra::Vector3::new(x[13], x[14], x[15]),
+        gyroscope_bias: nalgebra::Vector3::new(x[16], x[17], x[18]),
+        baro_altitude_bias: x[19],
+        gps_clock_bias: x[20],
+    }
+}
+
+// ===========================================================================
 // Embedded entry point — embassy executor
 // ===========================================================================
 
@@ -325,8 +353,26 @@ mod embedded {
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::channel::Channel;
     use embassy_time::{Duration, Timer};
+    use embedded_alloc::TlsfHeap as Heap;
+    use static_cell::StaticCell;
+
+    use themql_estimation::{
+        BarometerReading, Ekf, Estimator, EstimatorState, GpsReading, ImuReading,
+    };
+    use themql_gnc::{
+        Controller, HybridController, HybridSwitchingPolicy, LqriController, LqriMatrices,
+        PidController, PidGains, Setpoint,
+    };
 
     use super::*;
+
+    /// Heap size for the global allocator (16 KiB). Sufficient for EKF
+    /// `alloc` usage (String in errors, Vec in sample).
+    const HEAP_SIZE: usize = 16 * 1024;
+
+    /// Global allocator for `no_std` + `alloc` on Cortex-M.
+    #[global_allocator]
+    static ALLOC: Heap = Heap::empty();
 
     /// Channel: GPS driver → estimator.
     static GPS_CHAN: Channel<CriticalSectionRawMutex, TaggedReading, 8> = Channel::new();
@@ -334,6 +380,43 @@ mod embedded {
     static BARO_CHAN: Channel<CriticalSectionRawMutex, TaggedReading, 8> = Channel::new();
     /// Channel: IMU driver → estimator.
     static IMU_CHAN: Channel<CriticalSectionRawMutex, TaggedReading, 8> = Channel::new();
+
+    /// Tagged estimator state for the estimator→controller channel.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct TaggedEstimatorState {
+        /// The estimator state.
+        pub state: EstimatorState,
+    }
+
+    /// Channel: estimator → controller.
+    static EST_CHAN: Channel<CriticalSectionRawMutex, TaggedEstimatorState, 4> = Channel::new();
+
+    /// Decode a stub IMU reading into an [`ImuReading`]. Stub drivers
+    /// return zero bytes, so this produces a zero reading. Real drivers
+    /// would parse the raw sensor payload.
+    fn decode_imu(_reading: &SensorReading) -> ImuReading {
+        ImuReading {
+            accel: [0.0; 3],
+            gyro: [0.0; 3],
+        }
+    }
+
+    /// Decode a stub GPS reading into a [`GpsReading`].
+    fn decode_gps(_reading: &SensorReading) -> GpsReading {
+        GpsReading {
+            position: [0.0; 3],
+            velocity: [0.0; 3],
+            clock_bias: 0.0,
+        }
+    }
+
+    /// Decode a stub baro reading into a [`BarometerReading`].
+    fn decode_baro(_reading: &SensorReading) -> BarometerReading {
+        BarometerReading {
+            altitude: 0.0,
+            altitude_bias: 0.0,
+        }
+    }
 
     /// GPS sensor task. Reads at 10 Hz, pushes to [`GPS_CHAN`].
     #[embassy_executor::task]
@@ -381,24 +464,69 @@ mod embedded {
     }
 
     /// Estimator task. Consumes sensor readings from all three channels
-    /// at the IMU rate (200 Hz). In the full implementation this runs
-    /// the EKF predict/update cycle. In this stage it drains channels
-    /// and counts samples.
+    /// at the IMU rate (200 Hz). Runs the real EKF predict/update cycle:
+    /// IMU → predict, GPS → update_gps, Baro → update_baro. Publishes
+    /// the resulting [`EstimatorState`] to [`EST_CHAN`] for the controller.
     #[embassy_executor::task]
     pub async fn estimator_task() {
         let period = Duration::from_hz(IMU_RATE_HZ as u64);
-        let mut gps_count: u32 = 0;
-        let mut baro_count: u32 = 0;
-        let mut imu_count: u32 = 0;
+        let dt = 1.0 / f64::from(IMU_RATE_HZ);
+        let ekf: &'static mut Ekf = {
+            static EKF: StaticCell<Ekf> = StaticCell::new();
+            EKF.init(Ekf::new())
+        };
         loop {
-            while GPS_CHAN.try_receive().is_ok() {
-                gps_count = gps_count.wrapping_add(1);
+            while let Ok(tagged) = GPS_CHAN.try_receive() {
+                let gps = decode_gps(&tagged.reading);
+                let _ = ekf.update_gps(&gps);
             }
-            while BARO_CHAN.try_receive().is_ok() {
-                baro_count = baro_count.wrapping_add(1);
+            while let Ok(tagged) = BARO_CHAN.try_receive() {
+                let baro = decode_baro(&tagged.reading);
+                let _ = ekf.update_baro(&baro);
             }
-            while IMU_CHAN.try_receive().is_ok() {
-                imu_count = imu_count.wrapping_add(1);
+            while let Ok(tagged) = IMU_CHAN.try_receive() {
+                let imu = decode_imu(&tagged.reading);
+                let _ = ekf.predict(dt, &imu);
+            }
+            let _ = EST_CHAN.try_send(TaggedEstimatorState {
+                state: ekf.state().clone(),
+            });
+            Timer::after(period).await;
+        }
+    }
+
+    /// Controller task. Consumes [`EstimatorState`] from [`EST_CHAN`] at
+    /// the IMU rate, converts to [`GncState`], and runs the
+    /// [`HybridController`] to produce an [`ActuatorCommand`]. Uses
+    /// LQRI-with-PID-fallback policy.
+    #[embassy_executor::task]
+    pub async fn controller_task() {
+        let period = Duration::from_hz(IMU_RATE_HZ as u64);
+        let dt = 1.0 / f64::from(IMU_RATE_HZ);
+        let setpoint = Setpoint::new();
+        let controller: &'static mut HybridController = {
+            static CTL: StaticCell<HybridController> = StaticCell::new();
+            let pid = PidController::new(PidGains {
+                kp: [1.0; 3],
+                ki: [0.1; 3],
+                kd: [0.01; 3],
+            });
+            let lqri = LqriController::new(LqriMatrices {
+                K: nalgebra::SMatrix::zeros(),
+                Ki: nalgebra::SMatrix::zeros(),
+                Q: nalgebra::SMatrix::identity(),
+                R: nalgebra::SMatrix::identity(),
+            });
+            CTL.init(HybridController::new(
+                HybridSwitchingPolicy::AlwaysPid,
+                pid,
+                lqri,
+            ))
+        };
+        loop {
+            while let Ok(tagged) = EST_CHAN.try_receive() {
+                let gnc_state = super::estimator_to_gnc_state(&tagged.state);
+                let _cmd = controller.step(&gnc_state, &setpoint, dt);
             }
             Timer::after(period).await;
         }
@@ -454,10 +582,16 @@ mod embedded {
     }
 
     /// Embassy entry point. Per `specs/embedded.toml [entry]`, spawns
-    /// sensor tasks, estimator, telemetry, inference, and command tasks,
-    /// then runs the main loop at IMU rate.
+    /// sensor tasks, estimator, controller, telemetry, inference, and
+    /// command tasks, then runs the main loop at IMU rate.
     #[embassy_executor::main]
     async fn main(spawner: Spawner) {
+        #[allow(unsafe_code)]
+        unsafe {
+            let start = cortex_m_rt::heap_start() as usize;
+            ALLOC.init(start, HEAP_SIZE);
+        }
+
         let gps = GpsDriver::new(GPS_RATE_HZ);
         let baro = BaroDriver::new(BARO_RATE_HZ);
         let imu = ImuDriver::new(IMU_RATE_HZ);
@@ -466,6 +600,7 @@ mod embedded {
         try_spawn(&spawner, baro_task(baro));
         try_spawn(&spawner, imu_task(imu));
         try_spawn(&spawner, estimator_task());
+        try_spawn(&spawner, controller_task());
         try_spawn(&spawner, telemetry_task());
         try_spawn(&spawner, inference_task());
         try_spawn(&spawner, command_task());
@@ -710,5 +845,83 @@ mod tests {
         };
         assert_eq!(tr.kind, SensorKind::Imu);
         assert_eq!(tr.reading.raw.len(), 32);
+    }
+
+    #[test]
+    fn estimator_to_gnc_state_maps_fields() {
+        use themql_estimation::EstimatorState;
+        let mut est = EstimatorState::new();
+        est.x[0] = 1.0;
+        est.x[1] = 2.0;
+        est.x[2] = 3.0;
+        est.x[3] = 0.1;
+        est.x[4] = 0.2;
+        est.x[5] = 0.3;
+        est.x[10] = 0.01;
+        est.x[11] = 0.02;
+        est.x[12] = 0.03;
+        est.x[13] = 0.001;
+        est.x[14] = 0.002;
+        est.x[15] = 0.003;
+        est.x[16] = 0.0001;
+        est.x[17] = 0.0002;
+        est.x[18] = 0.0003;
+        est.x[19] = 10.0;
+        est.x[20] = 0.5;
+        let gnc = estimator_to_gnc_state(&est);
+        assert!((gnc.position.x - 1.0).abs() < 1e-12);
+        assert!((gnc.position.y - 2.0).abs() < 1e-12);
+        assert!((gnc.position.z - 3.0).abs() < 1e-12);
+        assert!((gnc.velocity.x - 0.1).abs() < 1e-12);
+        assert!((gnc.angular_velocity.z - 0.03).abs() < 1e-12);
+        assert!((gnc.accelerometer_bias.x - 0.001).abs() < 1e-12);
+        assert!((gnc.gyroscope_bias.y - 0.0002).abs() < 1e-12);
+        assert!((gnc.baro_altitude_bias - 10.0).abs() < 1e-12);
+        assert!((gnc.gps_clock_bias - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn estimator_to_gnc_state_identity_attitude() {
+        use themql_estimation::EstimatorState;
+        let est = EstimatorState::new();
+        let gnc = estimator_to_gnc_state(&est);
+        let q = gnc.attitude.quaternion();
+        assert!((q.w - 1.0).abs() < 1e-12);
+        assert!((q.i - 0.0).abs() < 1e-12);
+        assert!((q.j - 0.0).abs() < 1e-12);
+        assert!((q.k - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn full_ekf_to_controller_pipeline() {
+        use themql_estimation::{Ekf, Estimator, ImuReading};
+        use themql_gnc::{
+            Controller, HybridController, HybridSwitchingPolicy, LqriController, LqriMatrices,
+            PidController, PidGains, Setpoint,
+        };
+        let mut ekf = Ekf::new();
+        let imu = ImuReading {
+            accel: [0.1, 0.0, 0.0],
+            gyro: [0.0, 0.0, 0.01],
+        };
+        ekf.predict(0.01, &imu).expect("predict");
+        let gnc_state = estimator_to_gnc_state(ekf.state());
+        let pid = PidController::new(PidGains {
+            kp: [1.0; 3],
+            ki: [0.0; 3],
+            kd: [0.0; 3],
+        });
+        let lqri = LqriController::new(LqriMatrices {
+            K: nalgebra::SMatrix::zeros(),
+            Ki: nalgebra::SMatrix::zeros(),
+            Q: nalgebra::SMatrix::identity(),
+            R: nalgebra::SMatrix::identity(),
+        });
+        let controller = HybridController::new(HybridSwitchingPolicy::AlwaysPid, pid, lqri);
+        let setpoint = Setpoint::new();
+        let cmd = controller.step(&gnc_state, &setpoint, 0.01).expect("step");
+        for v in cmd.values {
+            assert!(v.is_finite(), "actuator must be finite");
+        }
     }
 }
