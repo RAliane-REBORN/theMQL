@@ -31,13 +31,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use themql_core::{Context, Error, Message, MessageHandler, Query, Resource, ResponseValue};
+use themql_core::{
+    Context, Error, Message, MessageHandler, Query, Resource, ResponseValue, Subject,
+};
 use thiserror::Error;
 
 use async_graphql::Object;
 use async_graphql::Subscription;
 
-use futures_util::stream::{self, Stream};
+use futures_util::stream::Stream;
 
 // ===========================================================================
 // GraphqlResolverBridge — dyn-compatible mapping of a GraphQL field to a
@@ -169,6 +171,95 @@ impl DispatchBridge for DispatchBridgeImpl {
 }
 
 // ===========================================================================
+// GraphqlSubscriptionSource — dyn-compatible source of live event streams
+// ===========================================================================
+
+/// A boxed, pinned stream of JSON values used by subscription sources.
+pub type JsonValueStream = Box<dyn Stream<Item = serde_json::Value> + Send + Unpin>;
+
+/// A source of live event streams keyed by subject. Implementations are
+/// typically backed by `themql-sse`'s `TokioSsePublisher` (broadcast
+/// channel) but any transport that can produce a stream of JSON values
+/// for a given subject can implement this trait.
+///
+/// This trait is dyn-compatible so `SubscriptionRoot` can hold
+/// `Arc<dyn GraphqlSubscriptionSource>`.
+pub trait GraphqlSubscriptionSource: Send + Sync {
+    /// Subscribe to `subject` and return a stream of JSON values, one
+    /// per published event.
+    ///
+    /// # Errors
+    /// Returns [`Error`] if the subscription cannot be established.
+    fn subscribe_stream<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<JsonValueStream, Error>> + Send + 'a>>;
+}
+
+/// Wrapper that adapts a `themql_sse::SseStream` into a
+/// `Stream<Item = serde_json::Value>`.
+///
+/// Uses a background task to pull events from the `SseStream` and
+/// forward them through a channel, avoiding self-referential borrow
+/// issues.
+struct SseStreamAdapter {
+    rx: tokio::sync::mpsc::Receiver<serde_json::Value>,
+}
+
+impl SseStreamAdapter {
+    fn new(mut stream: Box<dyn themql_sse::SseStream>) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel::<serde_json::Value>(64);
+        tokio::spawn(async move {
+            while let Ok(Some(event)) = stream.next_event().await {
+                let value = event_to_json(&event);
+                if tx.send(value).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Self { rx }
+    }
+}
+
+fn event_to_json(event: &themql_sse::SseEvent) -> serde_json::Value {
+    let data = serde_json::from_str(&event.data)
+        .unwrap_or_else(|_| serde_json::Value::String(event.data.clone()));
+    serde_json::json!({
+        "id": event.id,
+        "event": event.event,
+        "data": data,
+        "retry": event.retry,
+    })
+}
+
+impl Stream for SseStreamAdapter {
+    type Item = serde_json::Value;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+impl GraphqlSubscriptionSource for themql_sse::TokioSsePublisher {
+    fn subscribe_stream<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<JsonValueStream, Error>> + Send + 'a>> {
+        Box::pin(async move {
+            use themql_sse::SsePublisher;
+            let stream = SsePublisher::add_subscriber(self, subject)
+                .await
+                .map_err(|e| Error::internal_error(e.to_string()))?;
+            let adapter = SseStreamAdapter::new(stream);
+            Ok(Box::new(adapter) as JsonValueStream)
+        })
+    }
+}
+
+// ===========================================================================
 // Root types — QueryRoot, MutationRoot, SubscriptionRoot
 // ===========================================================================
 
@@ -263,41 +354,55 @@ impl MutationRoot {
     }
 }
 
-/// GraphQL `Subscription` root. Maps to `themql-message` streams via the
-/// SSE / MQTT bridge.
+/// GraphQL `Subscription` root. Maps to `themql-message` streams via
+/// the SSE bridge.
 ///
-/// TODO: real subscription streams are backed by `themql-message`'s
-/// `Stream` type and wired through the transport layer in a later
-/// stage. The field below emits a single placeholder value so the schema
-/// builds with a real `#[Subscription]` root.
+/// When constructed with a [`GraphqlSubscriptionSource`] (typically a
+/// `themql_sse::TokioSsePublisher`), `subscribe(subject)` returns a
+/// real live stream of events. When constructed via
+/// [`SubscriptionRoot::default`], the subscription returns an error.
 #[derive(Clone, Default)]
 pub struct SubscriptionRoot {
-    #[allow(dead_code)]
-    bridge: Option<Arc<dyn GraphqlResolverBridge>>,
+    source: Option<Arc<dyn GraphqlSubscriptionSource>>,
 }
 
 impl SubscriptionRoot {
-    /// Construct a `SubscriptionRoot` optionally holding a resolver
-    /// bridge for future stream wiring.
+    /// Construct a `SubscriptionRoot` backed by a live event source
+    /// (e.g. `themql_sse::TokioSsePublisher`).
     #[must_use]
-    pub fn new(bridge: Arc<dyn GraphqlResolverBridge>) -> Self {
+    pub fn with_source(source: Arc<dyn GraphqlSubscriptionSource>) -> Self {
         Self {
-            bridge: Some(bridge),
+            source: Some(source),
         }
     }
 }
 
 #[Subscription]
 impl SubscriptionRoot {
-    /// Subscribe to updates for `subject`. Emits a single placeholder
-    /// value then completes; real stream wiring is added in a later
-    /// stage once `themql-message` streams are integrated.
+    /// Subscribe to updates for `subject`. Returns a live stream of
+    /// JSON-encoded events from the underlying subscription source.
+    ///
+    /// # Errors
+    /// Returns an `async_graphql::Error` if no subscription source is
+    /// configured, if the subject is invalid, or if the subscription
+    /// cannot be established.
     async fn subscribe(
         &self,
         subject: String,
-    ) -> impl Stream<Item = async_graphql::Json<serde_json::Value>> {
-        let value = serde_json::json!({ "subject": subject, "placeholder": true });
-        stream::once(async move { async_graphql::Json(value) })
+    ) -> Result<impl Stream<Item = async_graphql::Json<serde_json::Value>>, async_graphql::Error>
+    {
+        use futures_util::StreamExt;
+        let source = self
+            .source
+            .as_ref()
+            .ok_or_else(|| async_graphql::Error::new("no subscription source configured"))?;
+        let subj =
+            Subject::from_str(&subject).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let stream = source
+            .subscribe_stream(&subj)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.message))?;
+        Ok(stream.map(async_graphql::Json))
     }
 }
 
@@ -498,7 +603,7 @@ mod tests {
         let schema = GraphqlSchemaImpl::new(
             QueryRoot::new(Arc::clone(&bridge)),
             MutationRoot::new(Arc::clone(&dispatch)),
-            SubscriptionRoot::new(Arc::clone(&bridge)),
+            SubscriptionRoot::default(),
         );
         let _ = schema.schema();
     }
@@ -591,5 +696,72 @@ mod tests {
             .block_on(bridge.resolve_field("not..valid", &args, &ctx))
             .expect_err("error for invalid subject");
         assert_eq!(err.code, ErrorCode::ValidationError);
+    }
+
+    #[tokio::test]
+    async fn subscription_with_source_streams_real_events() {
+        use futures_util::StreamExt;
+        use themql_core::Operation;
+        use themql_sse::{SsePublisher, TokioSsePublisher};
+
+        let publisher = Arc::new(TokioSsePublisher::new());
+        let source: Arc<dyn GraphqlSubscriptionSource> =
+            Arc::clone(&publisher) as Arc<dyn GraphqlSubscriptionSource>;
+        let resolver: Arc<dyn themql_core::Resolver> = Arc::new(StubResolver);
+        let bridge: Arc<dyn GraphqlResolverBridge> =
+            Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+        let dispatch: Arc<dyn DispatchBridge> =
+            Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
+        let schema = GraphqlSchemaImpl::new(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::with_source(source),
+        );
+
+        let publisher_clone = Arc::clone(&publisher);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let subject = Subject::from_str("vehicle.sensors.imu").expect("subject");
+            let subject_str = subject.as_str();
+            let msg = Message::new(&subject_str, Operation::Event).expect("message");
+            publisher_clone
+                .broadcast(&subject, &msg)
+                .await
+                .expect("broadcast");
+        });
+
+        let q = r#"subscription { subscribe(subject: "vehicle.sensors.imu") }"#;
+        let mut stream = schema.schema().execute_stream(q);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await;
+
+        assert!(
+            result.is_ok(),
+            "subscription should produce at least one event"
+        );
+        let response = result.expect("timeout").expect("event");
+        assert!(
+            response.errors.is_empty(),
+            "no errors expected, got {response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_without_source_returns_error() {
+        let resolver: Arc<dyn themql_core::Resolver> = Arc::new(StubResolver);
+        let bridge: Arc<dyn GraphqlResolverBridge> =
+            Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+        let dispatch: Arc<dyn DispatchBridge> =
+            Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
+        let schema = GraphqlSchemaImpl::new(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::default(),
+        );
+        let q = r#"subscription { subscribe(subject: "vehicle.sensors.imu") }"#;
+        let result = schema.schema().execute(q).await;
+        assert!(
+            !result.errors.is_empty(),
+            "expected error for no source, got {result:?}"
+        );
     }
 }

@@ -13,10 +13,11 @@ async-graphql.workspace = true
 async-graphql-axum.workspace = true
 axum.workspace = true
 themql-core.workspace = true
+themql-sse.workspace = true
 thiserror.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 futures-util.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

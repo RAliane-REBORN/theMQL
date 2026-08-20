@@ -6,16 +6,16 @@
 //! TUI, and Dioxus UI.
 //!
 //! This implementation wires a tokio `#[tokio::main]` entry point, clap
-//! CLI dispatch with placeholder prints, and a ratatui/crossterm TUI
-//! dashboard with three labelled panes (telemetry stream, state
-//! estimate, controller state). The actual server, training, analysis,
-//! and telemetry work is a future task; the dispatch here prints the
-//! chosen command so the wiring is observable end-to-end.
+//! CLI dispatch, and a ratatui/crossterm TUI dashboard. The `serve`,
+//! `analyze`, `train`, `validate`, and `telemetry` subcommands now
+//! compose real crate APIs (GraphQL + SSE server, polars analysis
+//! pipeline, artifact validation, storage-backed telemetry query).
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -36,15 +36,15 @@ struct Cli {
 /// Desktop subcommands. Mirrors `specs/desktop.toml [api.Command]`.
 #[derive(Debug, Clone, Subcommand)]
 enum Command {
-    /// Start the desktop server (GraphQL + SSE + MQTT bridge + UI).
+    /// Start the desktop server (GraphQL + SSE).
     Serve(ServeArgs),
-    /// Run a one-shot analysis pipeline.
+    /// Run a one-shot analysis pipeline on a JSON data file.
     Analyze(AnalyzeArgs),
-    /// Train a model and emit an artifact.
+    /// Train a model and emit an artifact (requires `tch-backend` feature).
     Train(TrainArgs),
     /// Validate a model artifact without activating it.
     Validate(ValidateArgs),
-    /// Inspect telemetry stored in helix-db.
+    /// Inspect telemetry stored in sled storage.
     Telemetry(TelemetryArgs),
     /// Launch the TUI dashboard.
     Tui,
@@ -68,9 +68,12 @@ struct ServeArgs {
 /// Arguments for the `analyze` subcommand.
 #[derive(Debug, Clone, Parser)]
 struct AnalyzeArgs {
-    /// Path to the analysis input file.
+    /// Path to the analysis input file (JSON array of rows).
     #[arg(long)]
     input: String,
+    /// Column headers (comma-separated).
+    #[arg(long)]
+    headers: String,
 }
 
 /// Arguments for the `train` subcommand. Mirrors
@@ -105,42 +108,331 @@ struct TelemetryArgs {
     /// Subject pattern to inspect.
     #[arg(long, default_value = "vehicle.#")]
     subject: String,
+    /// Path to the sled storage directory.
+    #[arg(long, default_value = "themql-data")]
+    storage: String,
 }
 
-/// Dispatch a parsed [`Command`] to its placeholder implementation.
+/// Dispatch a parsed [`Command`] to its implementation.
 ///
-/// This stub prints the chosen command. Real implementations will live
-/// in future tasks and may return errors.
-#[allow(clippy::unnecessary_wraps)]
-fn dispatch(command: &Command) -> Result<(), themql_core::Error> {
+/// # Errors
+/// Returns [`themql_core::Error`] if the subcommand fails.
+async fn dispatch(command: &Command) -> Result<(), themql_core::Error> {
     match command {
-        Command::Serve(args) => {
-            println!(
-                "themql-desktop: serve on {}:{} (mqtt={})",
-                args.bind, args.port, args.enable_mqtt
-            );
-        }
-        Command::Analyze(args) => {
-            println!("themql-desktop: analyze input={}", args.input);
-        }
-        Command::Train(args) => {
-            println!(
-                "themql-desktop: train dataset={} kind={} epochs={} output={}",
-                args.dataset, args.kind, args.epochs, args.output
-            );
-        }
-        Command::Validate(args) => {
-            println!("themql-desktop: validate artifact={}", args.artifact);
-        }
-        Command::Telemetry(args) => {
-            println!("themql-desktop: telemetry subject={}", args.subject);
-        }
+        Command::Serve(args) => serve(args).await,
+        Command::Analyze(args) => analyze(args).await,
+        Command::Train(args) => train(args).await,
+        Command::Validate(args) => validate(args),
+        Command::Telemetry(args) => telemetry(args).await,
         Command::Tui => {
-            println!("themql-desktop: launching TUI");
             if let Err(e) = tui_main() {
                 eprintln!("themql-desktop: tui error: {e}");
             }
+            Ok(())
         }
+    }
+}
+
+/// Stub resolver for the serve subcommand — returns the subject as JSON.
+struct DesktopResolver;
+
+impl themql_core::ResolverBoxed for DesktopResolver {
+    async fn resolve(
+        &self,
+        query: &themql_core::Query,
+        _ctx: &themql_core::Context,
+    ) -> Result<themql_core::Response, themql_core::Error> {
+        let subject = query.resource.subject.as_str();
+        Ok(themql_core::Response::ok(
+            themql_core::ResponseValue::Json(serde_json::json!({ "subject": subject })),
+            themql_core::CorrelationId::new(),
+        ))
+    }
+}
+
+/// Stub message handler for the serve subcommand.
+struct DesktopHandler;
+
+impl themql_core::MessageHandler for DesktopHandler {
+    fn handle<'a>(
+        &'a self,
+        msg: &'a themql_core::Message,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<themql_core::Response, themql_core::Error>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let subject = msg.subject.as_str();
+        let payload = msg.payload.clone();
+        Box::pin(async move {
+            Ok(themql_core::Response::ok(
+                themql_core::ResponseValue::Json(serde_json::json!({
+                    "subject": subject,
+                    "echo": payload,
+                })),
+                themql_core::CorrelationId::new(),
+            ))
+        })
+    }
+}
+
+/// Start the desktop server: GraphQL (POST /graphql + WS /graphql) and
+/// SSE (GET /events) on the same axum router.
+async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
+    use std::sync::Arc;
+    use themql_graphql::{
+        DispatchBridgeImpl, GraphqlResolverBridgeImpl, GraphqlSchema, GraphqlSchemaImpl,
+        MutationRoot, QueryRoot, SubscriptionRoot,
+    };
+    use themql_sse::TokioSsePublisher;
+
+    let resolver: Arc<dyn themql_core::Resolver> = Arc::new(DesktopResolver);
+    let bridge = Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+    let handler: Arc<dyn themql_core::MessageHandler> = Arc::new(DesktopHandler);
+    let dispatch = Arc::new(DispatchBridgeImpl::new(handler));
+
+    let publisher = Arc::new(TokioSsePublisher::new());
+    let source: Arc<dyn themql_graphql::GraphqlSubscriptionSource> =
+        Arc::clone(&publisher) as Arc<dyn themql_graphql::GraphqlSubscriptionSource>;
+
+    let schema = GraphqlSchemaImpl::new(
+        QueryRoot::new(bridge),
+        MutationRoot::new(dispatch),
+        SubscriptionRoot::with_source(source),
+    );
+
+    let sse_subject = themql_core::Subject::from_str("vehicle.events")
+        .map_err(|e| themql_core::Error::validation_error(e.to_string()))?;
+    let sse_publisher = TokioSsePublisher::new();
+    let sse_router = themql_sse::serve_sse(sse_publisher, sse_subject);
+    let graphql_router = themql_graphql::serve_graphql(schema.schema().clone());
+    let app = graphql_router.merge(sse_router);
+
+    let addr: std::net::SocketAddr = format!("{}:{}", args.bind, args.port)
+        .parse()
+        .map_err(|e| themql_core::Error::internal_error(format!("invalid bind address: {e}")))?;
+    println!("themql-desktop: serving GraphQL + SSE on http://{addr}");
+    if args.enable_mqtt {
+        println!("themql-desktop: MQTT bridge enabled (not yet wired)");
+    }
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| themql_core::Error::internal_error(format!("bind failed: {e}")))?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|e| themql_core::Error::internal_error(format!("server error: {e}")))?;
+    Ok(())
+}
+
+/// Wait for Ctrl-C to shut down the server.
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c().await.unwrap_or_else(|_| {
+        eprintln!("themql-desktop: shutdown signal failed");
+    });
+}
+
+/// Run a one-shot analysis pipeline on a JSON data file.
+async fn analyze(args: &AnalyzeArgs) -> Result<(), themql_core::Error> {
+    use themql_analysis::{
+        AnalysisInput, AnalysisPipeline, PolarsDatasetBuilder, RayonAnalysisPipeline,
+    };
+
+    let input = std::fs::read_to_string(&args.input)
+        .map_err(|e| themql_core::Error::internal_error(format!("read input: {e}")))?;
+    let json_rows: Vec<serde_json::Value> = serde_json::from_str(&input)
+        .map_err(|e| themql_core::Error::internal_error(format!("parse JSON: {e}")))?;
+    let headers: Vec<String> = args.headers.split(',').map(String::from).collect();
+
+    let mut rows: Vec<Vec<f64>> = Vec::with_capacity(json_rows.len());
+    for json_row in &json_rows {
+        let row: Vec<f64> = match json_row {
+            serde_json::Value::Array(arr) => {
+                arr.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect()
+            }
+            _ => {
+                return Err(themql_core::Error::validation_error(
+                    "each row must be a JSON array of numbers",
+                ));
+            }
+        };
+        rows.push(row);
+    }
+
+    let builder = PolarsDatasetBuilder::new(headers.clone());
+    let frame = builder
+        .build_from_rows(&headers, &rows)
+        .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+
+    let pipeline = RayonAnalysisPipeline::new();
+    let ctx = themql_core::Context::new();
+    let analysis = pipeline
+        .run(&AnalysisInput::DataFrame(frame), &ctx)
+        .await
+        .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+
+    println!("themql-desktop: analysis complete");
+    println!("  rows: {}", analysis.stats.rows);
+    println!("  columns: {}", analysis.stats.columns);
+    println!("  null cells: {}", analysis.stats.null_count);
+    Ok(())
+}
+
+/// Train a model and emit an artifact. Requires the `tch-backend` feature.
+#[allow(clippy::unused_async)]
+async fn train(args: &TrainArgs) -> Result<(), themql_core::Error> {
+    #[cfg(not(feature = "tch-backend"))]
+    {
+        let _ = args;
+        eprintln!("themql-desktop: train requires the `tch-backend` feature");
+        eprintln!("  rebuild with: cargo run --features tch-backend -- train ...");
+        Err(themql_core::Error::internal_error(
+            "tch-backend feature not enabled",
+        ))
+    }
+
+    #[cfg(feature = "tch-backend")]
+    {
+        use themql_artifact::{ArtifactMetadata, ArtifactWriter, BincodeArtifactWriter};
+        use themql_schema::{FeatureDType, FeatureSchema, TrainedModel, ValidationMetrics};
+        use themql_training::{Dataset, TchTrainer, Trainer, TrainerKind, TrainingConfig};
+
+        let dataset_bytes = std::fs::read(&args.dataset)
+            .map_err(|e| themql_core::Error::internal_error(format!("read dataset: {e}")))?;
+        let dataset: Dataset = bincode::deserialize(&dataset_bytes)
+            .map_err(|e| themql_core::Error::internal_error(format!("deserialize dataset: {e}")))?;
+
+        let feature_schema = FeatureSchema {
+            features: vec![],
+            input_dim: 1,
+            output_dim: 1,
+            dtype: FeatureDType::F32,
+            normalization: themql_schema::NormalizationSpec::None,
+        };
+
+        let kind = match args.kind.as_str() {
+            "dense" => TrainerKind::Dense,
+            "pinn" => TrainerKind::Pinn,
+            "gradient_boosting" => TrainerKind::GradientBoosting,
+            "fine_tuning" => TrainerKind::FineTuning,
+            other => {
+                return Err(themql_core::Error::validation_error(format!(
+                    "unknown trainer kind: {other}"
+                )))
+            }
+        };
+
+        let config = TrainingConfig {
+            kind,
+            epochs: args.epochs,
+            batch_size: 32,
+            learning_rate: 1.0e-3,
+            weight_decay: None,
+            early_stopping: None,
+            pruning: None,
+            sparsification: None,
+        };
+
+        let trainer = TchTrainer::new(kind);
+        let model: TrainedModel = trainer
+            .train(&dataset, &config)
+            .await
+            .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+
+        let metadata = ArtifactMetadata {
+            model_id: format!(
+                "themql-{}-{}",
+                args.kind,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            ),
+            training_version: "0.1".to_owned(),
+            dataset_version: "0.1".to_owned(),
+            feature_schema: feature_schema.clone(),
+            normalization: themql_schema::NormalizationSpec::None,
+            validation_metrics: ValidationMetrics {
+                loss: 0.0,
+                accuracy: None,
+                custom: std::collections::BTreeMap::new(),
+            },
+            pruning_metadata: None,
+        };
+
+        let writer = BincodeArtifactWriter::new("0.1", &args.kind);
+        let artifact = writer
+            .write(&model, &metadata)
+            .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+        writer
+            .write_to_file(&artifact, &std::path::Path::new(&args.output))
+            .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+
+        println!(
+            "themql-desktop: model trained and written to {}",
+            args.output
+        );
+        Ok(())
+    }
+}
+
+/// Validate a model artifact without activating it.
+fn validate(args: &ValidateArgs) -> Result<(), themql_core::Error> {
+    use themql_artifact::{ArtifactLoader, FileArtifactLoader};
+
+    let loader = FileArtifactLoader::new();
+    let path = PathBuf::from(&args.artifact);
+    let artifact = loader
+        .load(&path)
+        .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+
+    println!("themql-desktop: artifact validation passed");
+    println!("  format: {:?}", artifact.format);
+    println!("  schema_version: {}", artifact.schema_version);
+    println!("  model_bytes: {} bytes", artifact.model_bytes.len());
+    println!("  hash (first 16): {}", hex_first_16(&artifact.hash));
+    Ok(())
+}
+
+/// Format the first 16 bytes of a hash as hex.
+fn hex_first_16(bytes: &[u8]) -> String {
+    bytes.iter().take(16).fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
+/// Inspect telemetry stored in sled storage.
+async fn telemetry(args: &TelemetryArgs) -> Result<(), themql_core::Error> {
+    use themql_storage::{SledStorage, Storage, StorageQuery};
+
+    let storage = SledStorage::open(&args.storage)
+        .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+
+    let pattern = themql_core::SubjectPattern::from_str(&args.subject)
+        .map_err(|e| themql_core::Error::validation_error(e.to_string()))?;
+    let query = StorageQuery::BySubjectPattern(pattern);
+    let result_set = storage
+        .query(&query)
+        .await
+        .map_err(|e| themql_core::Error::internal_error(e.to_string()))?;
+
+    println!(
+        "themql-desktop: telemetry query '{subject}' returned {n} entries",
+        subject = args.subject,
+        n = result_set.entries.len()
+    );
+    for (key, value) in &result_set.entries {
+        println!(
+            "  key={key} format={format} {len}B",
+            key = key.as_str(),
+            format = value.format,
+            len = value.bytes.len()
+        );
     }
     Ok(())
 }
@@ -213,7 +505,7 @@ fn draw_dashboard(frame: &mut ratatui::Frame<'_>) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    dispatch(&cli.command)?;
+    dispatch(&cli.command).await?;
     Ok(())
 }
 
@@ -264,9 +556,19 @@ mod tests {
 
     #[test]
     fn cli_parses_analyze_subcommand() {
-        let cli = Cli::parse_from(["themql-desktop", "analyze", "--input", "x.csv"]);
+        let cli = Cli::parse_from([
+            "themql-desktop",
+            "analyze",
+            "--input",
+            "x.json",
+            "--headers",
+            "a,b,c",
+        ]);
         match cli.command {
-            Command::Analyze(args) => assert_eq!(args.input, "x.csv"),
+            Command::Analyze(args) => {
+                assert_eq!(args.input, "x.json");
+                assert_eq!(args.headers, "a,b,c");
+            }
             _ => panic!("must parse Analyze subcommand"),
         }
     }
@@ -301,49 +603,35 @@ mod tests {
         assert!(help.contains("tui"));
     }
 
-    #[test]
-    fn dispatch_serve_prints_port() {
-        let args = ServeArgs {
-            bind: "127.0.0.1".to_owned(),
-            port: 1234,
-            enable_mqtt: true,
-        };
-        dispatch(&Command::Serve(args)).unwrap();
-    }
-
-    #[test]
-    fn dispatch_analyze_succeeds() {
-        dispatch(&Command::Analyze(AnalyzeArgs {
-            input: "in.csv".to_owned(),
-        }))
-        .unwrap();
-    }
-
-    #[test]
-    fn dispatch_train_succeeds() {
-        dispatch(&Command::Train(TrainArgs {
-            dataset: "d.parquet".to_owned(),
+    #[cfg(not(feature = "tch-backend"))]
+    #[tokio::test]
+    async fn dispatch_train_without_feature_returns_error() {
+        let result = train(&TrainArgs {
+            dataset: "d.bin".to_owned(),
             kind: "dense".to_owned(),
             epochs: 1,
             output: "o.tar".to_owned(),
-        }))
-        .unwrap();
+        })
+        .await;
+        assert!(result.is_err());
     }
 
     #[test]
-    fn dispatch_validate_succeeds() {
-        dispatch(&Command::Validate(ValidateArgs {
-            artifact: "a.tar".to_owned(),
-        }))
-        .unwrap();
+    fn dispatch_validate_nonexistent_file_returns_error() {
+        let result = validate(&ValidateArgs {
+            artifact: "/nonexistent/path/model.bin".to_owned(),
+        });
+        assert!(result.is_err());
     }
 
-    #[test]
-    fn dispatch_telemetry_succeeds() {
-        dispatch(&Command::Telemetry(TelemetryArgs {
-            subject: "vehicle.state_estimate".to_owned(),
-        }))
-        .unwrap();
+    #[tokio::test]
+    async fn dispatch_telemetry_nonexistent_storage_returns_error() {
+        let result = telemetry(&TelemetryArgs {
+            subject: "vehicle.#".to_owned(),
+            storage: "/nonexistent/path/sled".to_owned(),
+        })
+        .await;
+        assert!(result.is_err());
     }
 
     #[test]
@@ -351,5 +639,12 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(40, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         terminal.draw(draw_dashboard).unwrap();
+    }
+
+    #[test]
+    fn hex_first_16_formats_correctly() {
+        let bytes = [0xab, 0xcd, 0xef];
+        let hex = hex_first_16(&bytes);
+        assert_eq!(hex, "abcdef");
     }
 }
