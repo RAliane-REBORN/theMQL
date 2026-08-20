@@ -55,10 +55,27 @@ methods = [
 ]
 
 [types]
-StorageKey = "string or structured key — implementation-defined, stable hash"
-StorageValue = "serialized bytes with explicit format tag"
-StorageQuery = "query against stored data — implementation maps to HelixDB query DSL"
-StorageResultSet = "stream or collection of StorageValue"
+StorageKey = "struct StorageKey(String) — opaque stable-hash string"
+StorageValue = """
+struct StorageValue {
+    bytes: Vec<u8>,
+    format: FormatTag,
+}
+"""
+StorageQuery = """
+enum StorageQuery {
+    ByKey(StorageKey),
+    BySubjectPattern(SubjectPattern),
+    ByPredicate(serde_json::Value),  # HelixDB query DSL serialised as JSON
+}
+"""
+StorageResultSet = """
+struct StorageResultSet {
+    entries: Vec<(StorageKey, StorageValue)>,
+    has_more: bool,
+    cursor: Option<String>,  # for pagination
+}
+"""
 StorageError = "canonical storage error enum"
 
 [error_model]

@@ -1,6 +1,25 @@
 [subsystem]
 name = "cache"
 crate = "themql-cache"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+Tiered cache orchestration for theMQL. L1 (cachelito) process-local
+ephemeral, L2 (moka) process-local ephemeral, L3 (valkey) distributed
+ephemeral, L4 (helix-db) authoritative persistent. Misses fall through
+to the next tier; authoritative misses return to the resolver or
+error. themql-cache owns the Cache/CacheTier traits and the orchestration
+of tiers; the underlying implementations (cachelito, moka, valkey,
+helix-db) are composed, not reimplemented.
+"""
+
+[references]
+related = [
+    "specs/core.toml",     # CachePolicy, CacheTier, CacheKey (via query)
+    "specs/query.toml",    # CacheKeyer
+    "specs/storage.toml"   # L4 = helix-db authoritative storage
+]
 
 [architecture]
 tiered = true
@@ -8,6 +27,13 @@ tiers = ["L1", "L2", "L3", "L4"]
 promotion = true
 demotion = true
 invalidation = true
+miss_chain = "L1 → L2 → L3 → L4 → resolver_or_error"
+write_through = true  # successful resolution writes back to all consulted tiers
+write_back = false  # never deferred — explicit only
+
+# ---------------------------------------------------------------------------
+# Tier implementations — composed, not reimplemented
+# ---------------------------------------------------------------------------
 
 [L1]
 implementation = "cachelito"
@@ -32,15 +58,109 @@ implementation = "helixdb"
 scope = "authoritative"
 authority = "persistent"
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+[api]
+public_types = [
+    "Cache",         # top-level orchestrator trait
+    "CacheTier",      # re-export from core
+    "CacheKey",       # re-export from query
+    "CacheEntry",     # value + metadata (ttl, inserted_at, source_tier)
+    "CachePolicy",    # re-export from core
+    "CacheError"      # themql-cache-owned
+]
+
+[api.Cache]
+description = """
+Top-level cache orchestrator. A single Cache instance coordinates all
+four tiers in order. Transport adapters and query resolvers depend on
+this trait, not on individual tier implementations.
+"""
+rust_type = """
+trait Cache: Send + Sync {
+    async fn get(&self, key: &CacheKey, policy: &CachePolicy) -> Result<CacheHit, CacheError>;
+    async fn put(&self, key: CacheKey, value: CacheEntry, policy: &CachePolicy) -> Result<(), CacheError>;
+    async fn invalidate(&self, key: &CacheKey) -> Result<(), CacheError>;
+    async fn invalidate_pattern(&self, pattern: &SubjectPattern) -> Result<(), CacheError>;
+}
+"""
+methods = [
+    "get — walks L1→L2→L3→L4 in order; returns first hit; promotes to higher tiers if found lower",
+    "put — writes through to all enabled tiers per CachePolicy.tier_hint (or all tiers if hint is None)",
+    "invalidate — removes a single key from all tiers",
+    "invalidate_pattern — removes all keys whose subject matches the pattern (used by Bridge on subject-change)"
+]
+
+[api.CacheHit]
+rust_type = """
+enum CacheHit {
+    Hit { value: CacheEntry, source_tier: CacheTier },
+    Miss,  // authoritative miss — caller must resolve and write-through
+}
+"""
+
+[api.CacheEntry]
+rust_type = """
+struct CacheEntry {
+    value: ResponseValue,  // re-export from core
+    inserted_at: Timestamp,
+    ttl: Option<Duration>,
+    source_tier: CacheTier,
+    etag: Option<String>,  // optional for conditional requests
+}
+"""
+
+[api.CacheError]
+rust_type = """
+enum CacheError {
+    TierUnavailable(CacheTier),
+    DeserializationError(String),
+    SerializationError(String),
+    InvalidPolicy,
+    PatternInvalid(SubjectError),
+}
+"""
+mapping_to_core_error = """
+CacheError -> themql_core::Error:
+  TierUnavailable -> internal_error
+  DeserializationError / SerializationError -> transport_error
+  InvalidPolicy -> validation_error
+  PatternInvalid -> validation_error
+"""
+
+# ---------------------------------------------------------------------------
+# Semantics
+# ---------------------------------------------------------------------------
+
 [semantics]
 miss = "next_tier"
-authoritative_miss = "resolver_or_error"
+authoritative_miss = "resolver_or_error"  # after L4 miss, return Miss to caller
 cache_key = "deterministic"
 ttl = "explicit"
 invalidation = "explicit"
+promotion = "on get-hit at lower tier, write back to higher tiers"
+demotion = "on put, optionally skip L1 if entry too large"
+
+[semantics.policy_resolution]
+order = [
+    "Query.cache_policy overrides",
+    "Context.cache_policy",
+    "tier_default"
+]
+
+# ---------------------------------------------------------------------------
+# Constraints
+# ---------------------------------------------------------------------------
 
 [constraints]
 custom_cache_engine = false
 duplicate_cache_semantics = false
 hidden_cache = false
 implicit_invalidation = false
+implicit_ttl = false
+cache_types_must_not_escape = false  # CacheKey and CachePolicy escape via core (canonical); CacheEntry must NOT escape themql-cache
+promote_on_hit = true
+write_through_on_miss = true
+cache_policy_canonical_in_core = true

@@ -17,6 +17,10 @@ type.
 [references]
 canonical = "specs/core.toml"
 
+# ---------------------------------------------------------------------------
+# Resolution — orchestration around the core Resolver trait.
+# ---------------------------------------------------------------------------
+
 [resolution]
 parallel = true
 batching = true
@@ -28,11 +32,103 @@ resolver_based = true
 defined_in = "specs/core.toml [api.Resolver]"
 signature = "async fn resolve(&self, query: &Query, ctx: &Context) -> Result<Response, Error>"
 
+# ---------------------------------------------------------------------------
+# QueryExecutor — orchestrator around Resolver.
+# Declared in core.toml [api] so transport adapters can depend on the trait
+# without a hard dep on themql-query; implemented here.
+# ---------------------------------------------------------------------------
+
+[api]
+public_types = [
+    "QueryExecutor",       # trait — orchestrates caching + batching + deadline
+    "CacheKeyer",           # trait — deterministic cache key derivation
+    "CacheKey",             # opaque stable-hash key
+    "Batcher",              # trait — groups concurrent queries for batch dispatch
+    "QueryError",           # themql-query-owned error
+]
+
+[api.QueryExecutor]
+description = """
+Orchestrator that wraps a Resolver with caching, batching, deadline
+propagation, and cancellation checks. Transport adapters call
+QueryExecutor::execute instead of Resolver::resolve directly so
+cross-cutting concerns are applied in one place.
+"""
+signature = "async fn execute(&self, query: &Query, ctx: &Context) -> Result<Response, Error>"
+rust_type = """
+trait QueryExecutor: Send + Sync {
+    async fn execute(&self, query: &Query, ctx: &Context) -> Result<Response, Error>;
+}
+"""
+responsibilities = [
+    "check Context.deadline before dispatch; return Error::Timeout if expired",
+    "check Context.cancellation before dispatch; return Error::Timeout if cancelled",
+    "consult CachePolicy: if enabled and not bypass, attempt cache read",
+    "on cache hit, return cached Response (do not invoke Resolver)",
+    "on cache miss, invoke Resolver; on success, write-through to cache per CachePolicy",
+    "if batching is configured and the resolver supports it, group concurrent queries",
+    "propagate Context.deadline and Context.cancellation into the Resolver call"
+]
+
+[api.CacheKeyer]
+description = """
+Derives a deterministic, hash-stable cache key from a Query. Used by
+themql-cache (L1-L4) so all tiers share the same key derivation.
+"""
+rust_type = """
+trait CacheKeyer: Send + Sync {
+    fn key(&self, query: &Query) -> CacheKey;
+}
+"""
+[api.CacheKey]
+rust_type = """
+struct CacheKey {
+    hash: [u8; 32],  // SHA-256 or blake3 stable hash
+}
+"""
+
+[api.CacheKey.derivation]
+derived_from = [
+    "resource.subject (canonical dot-joined string)",
+    "selection (serialised deterministically)",
+    "arguments (if present, serialised deterministically — serde_json canonical form)"
+]
+deterministic = true
+hash_stable = true
+notes = "Projection is NOT part of the cache key — the same selection may be projected differently by different callers"
+
+[api.Batcher]
+description = """
+Groups concurrent queries to the same resource for batch dispatch,
+when the underlying Resolver supports batching. Optional; if a
+QueryExecutor is constructed without a Batcher, queries are
+dispatched one-at-a-time.
+"""
+rust_type = """
+trait Batcher: Send + Sync {
+    async fn batch(&self, queries: Vec<Query>, ctx: &Context) -> Vec<Result<Response, Error>>;
+}
+"""
+
+[api.QueryError]
+rust_type = """
+enum QueryError {
+    DeadlineExpired,
+    Cancelled,
+    CacheLookupFailed,
+    BatchDispatchFailed,
+    ResolverReturned(Error),
+}
+"""
+mapping_to_core_error = "QueryError -> themql_core::Error (Timeout / internal_error / resolver_error)"
+notes = "QueryExecutor always returns themql_core::Error to callers; QueryError is internal"
+
 [cache]
 cacheable = true
 deterministic_key = true
 explicit_invalidation = true
 policy_in_context = true
+policy_canonical_in = "specs/core.toml [types.CachePolicy]"
 
 [cache.key]
 derived_from = ["resource", "selection", "arguments"]
@@ -51,3 +147,6 @@ transport_independent = true
 graphql_types_must_not_be_core_types = true
 transport_types_must_not_escape_adapter = true
 duplicate_query_model = false
+query_executor_orchestrates_not_resolves = true
+cache_key_canonical_here = true
+cache_policy_canonical_in_core = true

@@ -4,4 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "themql_runtime"
+path = "src/lib.rs"
+
+[features]
+desktop = ["tokio"]
+embedded = ["embassy-sync", "embassy-executor"]
+
 [dependencies]
+thiserror.workspace = true
+tokio = { workspace = true, optional = true, features = ["rt", "time", "sync"] }
+embassy-sync = { workspace = true, optional = true }
+embassy-executor = { workspace = true, optional = true }

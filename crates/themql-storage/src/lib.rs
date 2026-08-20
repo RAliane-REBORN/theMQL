@@ -1,0 +1,467 @@
+//! # themql-storage
+//!
+//! Authoritative storage adapter for theMQL. Wraps `HelixDB` as the L4
+//! authoritative tier of the cache stack and the durable persistence
+//! layer for telemetry, model artifacts, and query results that must
+//! survive process restarts.
+//!
+//! This crate owns the [`Storage`], [`StorageReader`], and
+//! [`StorageWriter`] traits plus the [`StorageKey`] / [`StorageValue`] /
+//! [`StorageQuery`] / [`StorageResultSet`] / [`StorageError`] types.
+//! The traits are storage-agnostic — `HelixDB` is one implementation, not
+//! a hard requirement of the trait surface.
+//!
+//! See `specs/storage.toml` for the authoritative specification.
+
+#![forbid(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![warn(missing_docs)]
+#![allow(clippy::module_name_repetitions)]
+
+use std::future::Future;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use themql_core::{Error as CoreError, FormatTag, SubjectPattern};
+
+/// Opaque, stable-hash storage key.
+///
+/// Wraps a `String` that is the canonical, deterministic key for a stored
+/// value. Implementations derive the inner string from the resource
+/// subject and (optionally) a content hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StorageKey(
+    /// The opaque key string.
+    pub String,
+);
+
+impl StorageKey {
+    /// Construct a storage key from an opaque string.
+    #[must_use]
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// The inner opaque string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A stored value: raw bytes plus the format tag identifying how to
+/// decode them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StorageValue {
+    /// The raw encoded bytes.
+    pub bytes: Vec<u8>,
+    /// The format identifying the encoding of `bytes`.
+    pub format: FormatTag,
+}
+
+impl StorageValue {
+    /// Construct a storage value from bytes and a format tag.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>, format: FormatTag) -> Self {
+        Self { bytes, format }
+    }
+}
+
+/// A query against storage. Mirrors the three access patterns `HelixDB`
+/// supports: direct key lookup, subject-pattern scan, and a
+/// predicate-tree query expressed as a JSON value (`HelixDB` query DSL).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StorageQuery {
+    /// Look up a single entry by exact key.
+    ByKey(StorageKey),
+    /// Scan all entries whose subject matches `pattern`.
+    BySubjectPattern(SubjectPattern),
+    /// Run a predicate query expressed in the storage's native DSL,
+    /// serialised as a JSON value.
+    ByPredicate(serde_json::Value),
+}
+
+/// A page of results from a [`StorageQuery`]. `has_more` and `cursor`
+/// together support pagination — pass `cursor` back to the next query
+/// to resume scanning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StorageResultSet {
+    /// The matched (key, value) pairs in this page.
+    pub entries: Vec<(StorageKey, StorageValue)>,
+    /// Whether more results are available beyond this page.
+    pub has_more: bool,
+    /// Opaque cursor for the next page; `None` when exhausted.
+    pub cursor: Option<String>,
+}
+
+impl StorageResultSet {
+    /// Construct an empty result set (no entries, no cursor).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            has_more: false,
+            cursor: None,
+        }
+    }
+
+    /// Whether this result set contains no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Errors raised by storage operations.
+///
+/// Maps to [`themql_core::Error`] via the [`From<StorageError>`]
+/// implementation, per `specs/storage.toml [error_model]`: connection /
+/// timeout / internal failures map to [`ErrorCode::InternalError`];
+/// not-found / already-exists / query failures map to
+/// [`ErrorCode::ResolverError`]; serialisation failures map to
+/// [`ErrorCode::TransportError`] (the value could not be moved across
+/// the storage boundary).
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum StorageError {
+    /// The requested key was not found.
+    #[error("storage key not found")]
+    NotFound,
+    /// An entry with the given key already exists (on a create-only op).
+    #[error("storage key already exists")]
+    AlreadyExists,
+    /// The connection to the storage backend could not be established.
+    #[error("storage connection failed")]
+    ConnectionFailed,
+    /// The operation did not complete before its deadline.
+    #[error("storage operation timed out")]
+    Timeout,
+    /// Serialisation of a value for write, or deserialisation on read,
+    /// failed.
+    #[error("storage serialization error: {0}")]
+    SerializationError(String),
+    /// A predicate query could not be executed (malformed DSL, unsupported
+    /// operator, etc.).
+    #[error("storage query error: {0}")]
+    QueryError(String),
+    /// An unexpected internal failure in the storage backend.
+    #[error("storage internal error")]
+    InternalError,
+}
+
+impl From<StorageError> for CoreError {
+    fn from(e: StorageError) -> Self {
+        match e {
+            StorageError::NotFound | StorageError::AlreadyExists | StorageError::QueryError(_) => {
+                Self::resolver_error(e.to_string())
+            }
+            StorageError::SerializationError(_) => Self::transport_error(e.to_string()),
+            StorageError::ConnectionFailed
+            | StorageError::Timeout
+            | StorageError::InternalError => Self::internal_error(e.to_string()),
+        }
+    }
+}
+
+/// Top-level storage trait combining read, write, delete, and query.
+///
+/// Implementations wrap `HelixDB` (L4 authoritative) or any other
+/// storage backend that can fulfil the contract. Async via
+/// `impl Future` return types (matching the `themql_core::Resolver`
+/// pattern).
+#[allow(async_fn_in_trait)]
+pub trait Storage: Send + Sync {
+    /// Read the value at `key`, if present.
+    ///
+    /// # Errors
+    /// Returns [`StorageError::NotFound`] only when a distinguishing
+    /// not-found is required; otherwise return `Ok(None)`. Other
+    /// failures return the appropriate [`StorageError`] variant.
+    fn get(
+        &self,
+        key: &StorageKey,
+    ) -> impl Future<Output = Result<Option<StorageValue>, StorageError>>;
+
+    /// Write `value` at `key`, overwriting any existing entry.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the write cannot be durably
+    /// acknowledged.
+    fn put(
+        &self,
+        key: &StorageKey,
+        value: StorageValue,
+    ) -> impl Future<Output = Result<(), StorageError>>;
+
+    /// Delete the entry at `key`.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the delete fails.
+    fn delete(&self, key: &StorageKey) -> impl Future<Output = Result<(), StorageError>>;
+
+    /// Run `q` against storage, returning a page of results.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the query cannot be executed.
+    fn query(
+        &self,
+        q: &StorageQuery,
+    ) -> impl Future<Output = Result<StorageResultSet, StorageError>>;
+}
+
+/// Read-only view of storage for query resolvers. Composed of `get` +
+/// `query` only — resolvers must not mutate.
+#[allow(async_fn_in_trait)]
+pub trait StorageReader: Send + Sync {
+    /// Read the value at `key`, if present.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] on failure.
+    fn get(
+        &self,
+        key: &StorageKey,
+    ) -> impl Future<Output = Result<Option<StorageValue>, StorageError>>;
+
+    /// Run `q` against storage, returning a page of results.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the query cannot be executed.
+    fn query(
+        &self,
+        q: &StorageQuery,
+    ) -> impl Future<Output = Result<StorageResultSet, StorageError>>;
+}
+
+/// Write-only view of storage for telemetry ingest and artifact
+/// persistence. Composed of `put` + `delete` only — writers must not
+/// read.
+#[allow(async_fn_in_trait)]
+pub trait StorageWriter: Send + Sync {
+    /// Write `value` at `key`, overwriting any existing entry.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the write cannot be durably
+    /// acknowledged.
+    fn put(
+        &self,
+        key: &StorageKey,
+        value: StorageValue,
+    ) -> impl Future<Output = Result<(), StorageError>>;
+
+    /// Delete the entry at `key`.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the delete fails.
+    fn delete(&self, key: &StorageKey) -> impl Future<Output = Result<(), StorageError>>;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use themql_core::{ErrorCode, SubjectPattern};
+
+    #[test]
+    fn storage_key_new_and_as_str() {
+        let k = StorageKey::new("vehicle.sensors.imu.gyro/abc123");
+        assert_eq!(k.as_str(), "vehicle.sensors.imu.gyro/abc123");
+        assert_eq!(k.0, "vehicle.sensors.imu.gyro/abc123");
+    }
+
+    #[test]
+    fn storage_key_eq_and_hash() {
+        let a = StorageKey::new("k1");
+        let b = StorageKey::new("k1");
+        let c = StorageKey::new("k2");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut set = std::collections::HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1, "equal keys collapse in a set");
+    }
+
+    #[test]
+    fn storage_key_round_trips_json() {
+        let k = StorageKey::new("opaque-key");
+        let json = serde_json::to_string(&k).unwrap();
+        assert_eq!(json, "\"opaque-key\"", "transparent serialisation");
+        let back: StorageKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, k);
+    }
+
+    #[test]
+    fn storage_value_new() {
+        let v = StorageValue::new(vec![1, 2, 3], FormatTag::Json);
+        assert_eq!(v.bytes, vec![1, 2, 3]);
+        assert_eq!(v.format, FormatTag::Json);
+    }
+
+    #[test]
+    fn storage_value_eq() {
+        let a = StorageValue::new(vec![1], FormatTag::Json);
+        let b = StorageValue::new(vec![1], FormatTag::Json);
+        let c = StorageValue::new(vec![1], FormatTag::Bincode);
+        assert_eq!(a, b);
+        assert_ne!(a, c, "different format => different value");
+    }
+
+    #[test]
+    fn storage_value_round_trips_json() {
+        let v = StorageValue::new(vec![10, 20, 30], FormatTag::Postcard);
+        let json = serde_json::to_string(&v).unwrap();
+        let back: StorageValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn storage_query_by_key() {
+        let q = StorageQuery::ByKey(StorageKey::new("k"));
+        match q {
+            StorageQuery::ByKey(k) => assert_eq!(k.as_str(), "k"),
+            _ => panic!("expected ByKey"),
+        }
+    }
+
+    #[test]
+    fn storage_query_by_subject_pattern() {
+        let p = SubjectPattern::from_str("vehicle.#").unwrap();
+        let q = StorageQuery::BySubjectPattern(p);
+        match &q {
+            StorageQuery::BySubjectPattern(p) => assert_eq!(p.as_str(), "vehicle.#"),
+            _ => panic!("expected BySubjectPattern"),
+        }
+    }
+
+    #[test]
+    fn storage_query_by_predicate() {
+        let pred = serde_json::json!({"field": "position.x", "op": "gt", "value": 0});
+        let q = StorageQuery::ByPredicate(pred.clone());
+        match q {
+            StorageQuery::ByPredicate(v) => assert_eq!(v, pred),
+            _ => panic!("expected ByPredicate"),
+        }
+    }
+
+    #[test]
+    fn storage_result_set_empty_is_empty() {
+        let rs = StorageResultSet::empty();
+        assert!(rs.is_empty());
+        assert!(!rs.has_more);
+        assert!(rs.cursor.is_none());
+    }
+
+    #[test]
+    fn storage_result_set_with_entries() {
+        let rs = StorageResultSet {
+            entries: vec![(
+                StorageKey::new("k1"),
+                StorageValue::new(vec![1], FormatTag::Json),
+            )],
+            has_more: true,
+            cursor: Some("cursor-abc".to_owned()),
+        };
+        assert!(!rs.is_empty());
+        assert_eq!(rs.entries.len(), 1);
+        assert!(rs.has_more);
+        assert_eq!(rs.cursor.as_deref(), Some("cursor-abc"));
+    }
+
+    #[test]
+    fn storage_result_set_round_trips_json() {
+        let rs = StorageResultSet {
+            entries: vec![
+                (
+                    StorageKey::new("a"),
+                    StorageValue::new(vec![1], FormatTag::Json),
+                ),
+                (
+                    StorageKey::new("b"),
+                    StorageValue::new(vec![2], FormatTag::Bincode),
+                ),
+            ],
+            has_more: false,
+            cursor: None,
+        };
+        let json = serde_json::to_string(&rs).unwrap();
+        let back: StorageResultSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rs);
+    }
+
+    #[test]
+    fn storage_error_not_found_constructs() {
+        let e = StorageError::NotFound;
+        assert_eq!(e.to_string(), "storage key not found");
+    }
+
+    #[test]
+    fn storage_error_already_exists_constructs() {
+        let e = StorageError::AlreadyExists;
+        assert!(e.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn storage_error_query_error_carries_message() {
+        let e = StorageError::QueryError("malformed predicate".to_owned());
+        assert!(e.to_string().contains("malformed predicate"));
+    }
+
+    #[test]
+    fn storage_error_serialization_error_carries_message() {
+        let e = StorageError::SerializationError("decode failed".to_owned());
+        assert!(e.to_string().contains("decode failed"));
+    }
+
+    #[test]
+    fn storage_error_not_found_maps_to_resolver_error() {
+        let se = StorageError::NotFound;
+        let core: CoreError = se.into();
+        assert_eq!(core.code, ErrorCode::ResolverError);
+    }
+
+    #[test]
+    fn storage_error_already_exists_maps_to_resolver_error() {
+        let se = StorageError::AlreadyExists;
+        let core: CoreError = se.into();
+        assert_eq!(core.code, ErrorCode::ResolverError);
+    }
+
+    #[test]
+    fn storage_error_query_error_maps_to_resolver_error() {
+        let se = StorageError::QueryError("bad".to_owned());
+        let core: CoreError = se.into();
+        assert_eq!(core.code, ErrorCode::ResolverError);
+    }
+
+    #[test]
+    fn storage_error_serialization_maps_to_transport_error() {
+        let se = StorageError::SerializationError("bad".to_owned());
+        let core: CoreError = se.into();
+        assert_eq!(core.code, ErrorCode::TransportError);
+    }
+
+    #[test]
+    fn storage_error_connection_failed_maps_to_internal_error() {
+        let se = StorageError::ConnectionFailed;
+        let core: CoreError = se.into();
+        assert_eq!(core.code, ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn storage_error_timeout_maps_to_internal_error() {
+        let se = StorageError::Timeout;
+        let core: CoreError = se.into();
+        assert_eq!(core.code, ErrorCode::InternalError);
+    }
+
+    #[test]
+    fn storage_error_internal_error_maps_to_internal_error() {
+        let se = StorageError::InternalError;
+        let core: CoreError = se.into();
+        assert_eq!(core.code, ErrorCode::InternalError);
+    }
+}

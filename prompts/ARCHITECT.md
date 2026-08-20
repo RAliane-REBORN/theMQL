@@ -106,12 +106,14 @@ They must not become the canonical control/state representation.
 
 ## Numerical policy
 
-Use ndarray for:
+Use nalgebra for:
 
 - EKF numerical operations
 - covariance matrices
 - conventional linear algebra
 - deterministic numerical algorithms
+- quaternion attitude representation
+- rotation matrices and SO(3) operations
 
 Use tch-rs for:
 
@@ -122,6 +124,10 @@ Use tch-rs for:
 - fine tuning
 - pruning
 - ML inference
+
+ndarray is retained only as a workspace dependency for raw ML-side
+array buffers. Do not route GNC, estimation, or inference linear
+algebra through ndarray.
 
 Do not introduce tch-rs into deterministic GNC merely for convenience.
 

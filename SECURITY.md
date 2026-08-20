@@ -140,14 +140,59 @@ Before a change touches anything in `themql-transport`, `themql-graphql`,
 - Does it introduce unbounded channels or blocking work on the async
   executor? (must not)
 
-## Known limitations (as of v0.1)
+## Known limitations (as of v0.1, 2026-08-20, Phase 1 complete)
 
+All 19 crates now have real `src/` content (traits + types + error types +
+unit tests). The four safety-critical crates (themql-gnc, themql-estimation,
+themql-inference, themql-artifact) comply with TETANUS.md (Power of Ten
+rules): `#![forbid(unsafe_code)]`, `#![deny(warnings)]`, `clippy::pedantic`,
+no recursion, fixed loop bounds, no heap alloc after init where required,
+functions <= 60 lines, >= 2 assertions per public function as
+`if !invariant { return Err }`, no unwrap()/expect() in non-test code.
+
+- **Placeholder hash in themql-artifact (MUST FIX BEFORE DEPLOYMENT)** —
+  `HashValidator` uses a deterministic fold hash, NOT real SHA-256 or BLAKE3.
+  It is NOT cryptographically secure. A malicious or corrupt model artifact
+  could pass the integrity check. This is an acknowledged v0.1 placeholder
+  to avoid pulling a crypto crate into a safety-critical crate; it must be
+  replaced with a real cryptographic hash before any deployment.
+- **Simplified EKF in themql-estimation** — the v0.1 `Ekf` uses
+  identity-gain updates, NOT full nonlinear quaternion dynamics +
+  Jacobian-based Kalman gain. State estimation correctness is NOT
+  flight-ready. This is a tracked placeholder, not a security bug, but it
+  affects safety-of-flight if relied upon.
+- **21-dim EKF state (fixed, no dynamic allocation)** — `EstimatorState`
+  is a fixed 21-dimensional nalgebra `SVector<f64, 21>` with a fixed
+  `SMatrix<f64, 21, 21>` covariance. No heap allocation after `new()`. This
+  is a safety property (predictable memory, no allocator failure in the
+  control loop) and a TETANUS compliance point.
+- **TETANUS compliance of gnc/estimation/inference/artifact** — all four
+  safety-critical crates carry `#![forbid(unsafe_code)]` and pass the Power
+  of Ten rules. No `unsafe` exists anywhere in the workspace.
+- **No tch-backed InferenceEngine impl** — themql-inference defines the
+  `InferenceEngine` trait but has no concrete tch-backed implementation
+  (libtorch build dep deferred). The rollback/budget validation surface
+  exists; no live tensor execution surface yet.
+- **EmbassyRuntime sleep stub** — themql-runtime's `EmbassyRuntime` sleep
+  is a stub; embassy 0.10 `Spawner` is not `Send`/`Sync` so the
+  `EmbeddedRuntime` trait was relaxed from the spec. Confirm before
+  relying on the embedded runtime in flight.
 - No formal security review process yet.
 - No fuzzing harness.
-- No dependency audit pipeline.
+- No dependency audit pipeline (cargo-deny not installed; config ready).
 - No secret-management policy for HelixDB / Valkey credentials.
 - No transport-layer authn/authz policy (MQTT broker credentials, GraphQL
   access control). These land in Phase 4 with the transport implementations.
+- `themql-cache`, `themql-transport`, `themql-storage` define only traits +
+  types + error types (per their specs). No concrete backends are wired, so
+  there is no live cache/storage/transport attack surface yet — but when
+  backends land, the trait boundary is where access control, credential
+  handling, and input validation must be enforced. The traits themselves
+  carry no authn/authz; that is the responsibility of the concrete adapter
+  implementations and the `Context.principal` carried through `themql-core`.
+- Heavy deps (tch, polars, dioxus, ratatui, embassy) are deferred in
+  training/analysis/desktop/embedded — those crates define traits + minimal
+  types only, so no live ML/UI/analysis attack surface yet.
 
 These limitations are tracked; they are not open invitations to land
 insecure defaults when the corresponding code is written.

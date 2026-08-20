@@ -9,3 +9,5 @@ name = "themql-desktop"
 path = "src/main.rs"
 
 [dependencies]
+themql-core.workspace = true
+clap = { workspace = true, features = ["derive"] }

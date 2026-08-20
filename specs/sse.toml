@@ -43,6 +43,18 @@ methods = [
     "fn subject(&self) -> &Subject"
 ]
 
+[api.SseEvent]
+description = "One Server-Sent Event frame. Carries a themql-core Message payload as JSON."
+rust_type = """
+struct SseEvent {
+    id: Option<String>,         # SSE id field; carries Message.id for Last-Event-ID replay
+    event: Option<String>,      # SSE event field; carries Operation as lowercase string
+    data: String,               # SSE data field; JSON-encoded Message payload
+    retry: Option<u32>,         # SSE retry field; ms before client reconnects
+}
+"""
+serde = "per SSE wire format (text/event-stream): 'id: ...\\nevent: ...\\ndata: ...\\nretry: ...\\n\\n'"
+
 [api.SsePublisher]
 description = "Server-side publisher that pushes Messages to connected SSE clients"
 methods = [

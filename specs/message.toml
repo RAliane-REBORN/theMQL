@@ -7,14 +7,22 @@ subordinate_to = "specs/core.toml"
 
 [purpose]
 description = """
-Message routing, subject hierarchy, and serialisation specialisation.
-The canonical Message type, its fields, identity, and operations are
-defined in specs/core.toml. This file specialises how Messages are
-routed and serialised; it does not redefine the Message type.
+Message routing, subject hierarchy, subject parsing/matching, and
+serialisation specialisation. The canonical Message type, its fields,
+identity, and operations are defined in specs/core.toml. This file
+specialises how Messages are routed and serialised; it does not
+redefine the Message type.
 """
 
 [references]
 canonical = "specs/core.toml"
+
+# ---------------------------------------------------------------------------
+# Subject grammar — the canonical grammar for Subject and SubjectPattern.
+# core.toml owns the Subject/SubjectSegment/SubjectPattern/PatternSegment
+# types; this file owns the grammar and the parser/matcher that operate on
+# them.
+# ---------------------------------------------------------------------------
 
 [routing]
 subject_based = true
@@ -28,10 +36,89 @@ example = "vehicle.sensors.imu.gyro"
 wildcard_single = "+ matches one segment"
 wildcard_multi = "# matches zero or more segments"
 
+[routing.subject_grammar]
+# ABNF-ish, dot-separated tokens.
+#
+#   concrete_subject = segment *( "." segment )
+#   segment          = 1*( ALPHA / DIGIT / "_" / "-" )
+#
+#   pattern_subject  = pattern-segment *( "." pattern-segment )
+#   pattern-segment  = segment / "+" / "#"
+#   constraint: "#" may appear only as the LAST pattern-segment
+#
+separator = "."
+segment_charset = "a-zA-Z0-9_-"
+segment_min_length = 1
+wildcard_single = "+"
+wildcard_multi = "#"
+wildcard_multi_position = "last segment only (in patterns)"
+empty_subject_forbidden = true
+leading_separator_forbidden = true
+trailing_separator_forbidden = true
+consecutive_separators_forbidden = true
+
 [routing.subject_resolution]
 one_subject = "exactly one Message subject"
 case_sensitive = true
 trailing_separator_forbidden = true
+
+# ---------------------------------------------------------------------------
+# Subject API surface — implemented in themql-message.
+# core.toml defines the types; this spec defines the methods.
+# ---------------------------------------------------------------------------
+
+[api]
+public_types = [
+    "Subject",           # re-export from themql-core
+    "SubjectSegment",    # re-export from themql-core
+    "SubjectPattern",    # re-export from themql-core
+    "PatternSegment",    # re-export from themql-core
+    "SubjectError"       # themql-message-owned
+]
+
+[api.Subject]
+description = "Concrete routing key. Owned canonically by core.toml."
+methods = [
+    "fn from_segments(segments: Vec<SubjectSegment>) -> Result<Self, SubjectError>",
+    " fn from_str(s: &str) -> Result<Self, SubjectError>",
+    "fn as_str(&self) -> String  // dot-joined",
+    "fn segments(&self) -> &[SubjectSegment]",
+    "fn is_concrete(&self) -> bool  // always true for Subject; false for SubjectPattern"
+]
+
+[api.SubjectSegment]
+methods = [
+    "fn new(s: &str) -> Result<Self, SubjectError>",
+    "fn as_str(&self) -> &str"
+]
+
+[api.SubjectPattern]
+description = "Routing pattern with wildcards. Owned canonically by core.toml."
+methods = [
+    "fn from_str(s: &str) -> Result<Self, SubjectError>",
+    "fn matches(&self, subject: &Subject) -> bool",
+    "fn as_str(&self) -> String"
+]
+
+[api.SubjectError]
+rust_type = """
+enum SubjectError {
+    EmptySegment,
+    InvalidCharset { segment: String },
+    SeparatorInSegment,
+    TrailingSeparator,
+    LeadingSeparator,
+    ConsecutiveSeparators,
+    WildcardInConcreteSubject,
+    WildcardMultiNotLast,
+    EmptySubject,
+}
+"""
+mapping_to_core_error = "SubjectError -> themql_core::Error::validation_error"
+
+# ---------------------------------------------------------------------------
+# Serialization — format dispatch
+# ---------------------------------------------------------------------------
 
 [serialization]
 explicit = true
@@ -39,12 +126,41 @@ serde_allowed = true
 binary_supported = true
 text_supported = true
 format_negotiable = true
-format_tagged = true
+format_tagged = true  # payload carries its own format tag
 
 [serialization.formats]
 json = "default text format"
 bincode = "default binary format"
-custom = "allowed only when spec-required; must be explicit in Message metadata"
+postcard = "embedded-friendly binary format"
+custom = "allowed only when spec-required; must be explicit in Message metadata (Payload::FormatTag::Custom)"
+
+[api.Serializer]
+description = """
+Format dispatch over a Message payload. themql-message owns the trait
+so transport adapters can delegate to a single serializer instead of
+each implementing format-specific logic.
+"""
+rust_type = """
+trait Serializer {
+    fn serialize(msg: &Message, format: FormatTag) -> Result<Vec<u8>, MessageError>;
+    fn deserialize(bytes: &[u8], format: FormatTag) -> Result<Message, MessageError>;
+}
+"""
+methods = [
+    "fn serialize(msg: &Message, format: FormatTag) -> Result<Vec<u8>, MessageError>",
+    "fn deserialize(bytes: &[u8], format: FormatTag) -> Result<Message, MessageError>"
+]
+
+[api.MessageError]
+rust_type = """
+enum MessageError {
+    SerializationError(String),
+    DeserializationError(String),
+    UnsupportedFormat(FormatTag),
+    PayloadMismatch,
+}
+"""
+mapping_to_core_error = "MessageError -> themql_core::Error::transport_error"
 
 [identity]
 correlation = true
@@ -58,3 +174,6 @@ no_duplicate_message_model = true
 ownership_explicit = true
 clone_minimization = true
 routing_business_logic_in_transport = false
+subject_grammar_canonical_here = true
+subject_type_canonical_in_core_toml = true
+serializer_dispatch_owned_here = true

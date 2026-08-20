@@ -30,6 +30,10 @@ canonical = [
     "Resource"
 ]
 
+# ---------------------------------------------------------------------------
+# Message
+# ---------------------------------------------------------------------------
+
 [types.Message]
 description = """
 The fundamental primitive. Every request, command, event, stream,
@@ -45,11 +49,11 @@ required_fields = [
 ]
 
 [types.Message.fields]
-id = "MessageId — unique identifier"
+id = "MessageId — unique identifier (UUID v7 or equivalent monotonic-ish)"
 timestamp = "Timestamp — monotonic or wall-clock, explicitly tagged"
 subject = "Subject — hierarchical routing key (e.g. 'vehicle.sensors.imu.gyro')"
-operation = "Operation — one of the values in [operations.allowed]"
-payload = "Payload — explicitly typed, serde-serialisable"
+operation = "Operation — one of the values in [types.Message.operations.allowed]"
+payload = "Payload — explicitly typed, serde-serialisable, format-tagged"
 metadata = "Metadata — key-value bag for correlation, causation, trace ids, auth"
 
 [types.Message.identity]
@@ -67,6 +71,233 @@ allowed = [
     "telemetry",
     "error"
 ]
+
+# ---------------------------------------------------------------------------
+# Identity types
+# ---------------------------------------------------------------------------
+
+[types.MessageId]
+description = "Unique identifier for a Message."
+rust_type = "struct MessageId(Uuid)"
+construction = "MessageId::new() generates a fresh UUID v7"
+equality = "by inner UUID"
+ordering = "by inner UUID (partial, for diagnostics only — not for causality)"
+serde = "transparent — serialises as the inner UUID string"
+
+[types.CorrelationId]
+description = """
+Links a Response (or error) back to the Query/Command that caused it.
+Carried in Message.metadata. Required on Responses; optional on
+commands/events.
+"""
+rust_type = "struct CorrelationId(Uuid)"
+construction = "CorrelationId::for_request(&MessageId) derives from the originating request id"
+equality = "by inner UUID"
+
+[types.CausationId]
+description = """
+Links an Event back to the Command that caused it. Carried in
+Message.metadata. Required on Events; optional elsewhere.
+"""
+rust_type = "struct CausationId(Uuid)"
+equality = "by inner UUID"
+
+# ---------------------------------------------------------------------------
+# Subject — hierarchical routing key. Grammar lives in message.toml; the
+# type is defined here because it appears in Message, Query.resource, and
+# every transport adapter. themql-message owns the parser/matcher.
+# ---------------------------------------------------------------------------
+
+[types.Subject]
+description = """
+Hierarchical, dot-separated routing key and Resource identity.
+Examples: 'vehicle.sensors.imu.gyro', 'vehicle.actuators.fins.fin1'.
+Subject is the routing key, the cache-key input, the MQTT topic, and
+the SSE endpoint identifier.
+"""
+rust_type = """
+struct Subject {
+    segments: Vec<SubjectSegment>,
+}
+"""
+construction = "Subject::new(segments) — validates each segment"
+serde = "as a dot-joined string (not as a Vec)"
+equality = "segment-by-segment, case-sensitive"
+ordering = "lexicographic over segments (for cache key stability)"
+hash = "over the canonical dot-joined string"
+clone_policy = "clone allowed; cheap (Vec<SmallString> or Vec<String>)"
+
+[types.SubjectSegment]
+description = "A single non-empty segment of a Subject."
+rust_type = """
+struct SubjectSegment(String);
+"""
+constraints = [
+    "non-empty",
+    "no '.' (separator is between segments, not within)",
+    "case-sensitive",
+    "'+' (single-segment wildcard) is valid only in pattern Subjects, not in concrete Subjects",
+    "'#' (multi-segment wildcard) is valid only as the LAST segment of a pattern Subject",
+]
+
+[types.SubjectPattern]
+description = """
+A Subject that may contain wildcards ('+' matches one segment, '#'
+matches zero or more trailing segments). Used for subscriptions and
+cache invalidation patterns, never as a concrete Message.subject.
+"""
+rust_type = """
+struct SubjectPattern {
+    segments: Vec<PatternSegment>,
+}
+"""
+match_semantics = """
+matches(subject: &Subject) -> bool:
+  - concrete segment matches concrete segment by exact string equality
+  - '+' matches any single concrete segment
+  - '#' matches zero or more trailing concrete segments (must be last)
+"""
+
+[types.PatternSegment]
+rust_type = """
+enum PatternSegment {
+    Concrete(SubjectSegment),
+    WildcardOne,    // '+'
+    WildcardMulti,  // '#'
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Operation
+# ---------------------------------------------------------------------------
+
+[types.Operation]
+description = "The verb of a Message. Tags payload semantics."
+rust_type = """
+enum Operation {
+    Query,
+    Command,
+    Event,
+    Stream,
+    Response,
+    Telemetry,
+    Error,
+}
+"""
+serde = "as a lowercase string ('query', 'command', ...)"
+exhaustive = true
+
+# ---------------------------------------------------------------------------
+# Payload — typed, serde-serialisable, format-tagged
+# ---------------------------------------------------------------------------
+
+[types.Payload]
+description = """
+Explicitly typed, serde-serialisable payload of a Message. The format
+is tagged in the payload itself (not inferred from transport).
+"""
+rust_type = """
+enum Payload {
+    Json(serde_json::Value),
+    Bytes(Vec<u8>, FormatTag),
+    Unit,  // for messages with no payload body (e.g. heartbeat)
+}
+"""
+constraints = [
+    "format is explicit — never inferred from transport",
+    "Bytes variant carries a FormatTag so the receiver knows how to decode",
+    "Unit is used for control messages with no body",
+]
+
+[types.FormatTag]
+rust_type = """
+enum FormatTag {
+    Json,
+    Bincode,
+    Postcard,
+    Custom(String),
+}
+"""
+serde = "as a lowercase string"
+
+# ---------------------------------------------------------------------------
+# Metadata — key-value bag
+# ---------------------------------------------------------------------------
+
+[types.Metadata]
+description = """
+Key-value bag carried on every Message. Holds correlation id,
+causation id, trace id, auth principal, format hint, and arbitrary
+extension keys.
+"""
+rust_type = """
+struct Metadata {
+    correlation_id: Option<CorrelationId>,
+    causation_id: Option<CausationId>,
+    trace_id: Option<TraceId>,
+    auth_principal: Option<Principal>,
+    format: Option<FormatTag>,
+    extensions: BTreeMap<String, serde_json::Value>,
+}
+"""
+constraints = [
+    "extension keys are arbitrary but must be serde_json::Value-serialisable",
+    "BTreeMap (not HashMap) for deterministic iteration and stable hash",
+    "extensions must not duplicate the named fields (correlation_id etc.)",
+]
+
+[types.TraceId]
+rust_type = "struct TraceId(Uuid)"
+[types.Principal]
+rust_type = """
+struct Principal {
+    id: String,
+    scopes: Vec<String>,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Timestamp + Deadline
+# ---------------------------------------------------------------------------
+
+[types.Timestamp]
+description = """
+Monotonic or wall-clock timestamp on every Message. Tagged explicitly
+so consumers know whether to trust it for ordering.
+"""
+rust_type = """
+struct Timestamp {
+    kind: TimestampKind,
+    nanos_since_epoch: i64,
+}
+enum TimestampKind { Monotonic, WallClock }
+"""
+serde = "as { kind: 'monotonic'|'wall_clock', nanos: i64 }"
+
+[types.Deadline]
+description = """
+Absolute deadline for a Query resolution or Command dispatch. Carried
+in Context. Resolvers must check the deadline before returning a result
+and return Error::Timeout if exceeded.
+"""
+rust_type = """
+struct Deadline {
+    kind: TimestampKind,
+    nanos_since_epoch: i64,
+}
+"""
+methods = [
+    "fn is_expired(&self, now: &Timestamp) -> bool",
+    "fn remaining(&self, now: &Timestamp) -> Option<Duration>",
+]
+constraints = [
+    "deadline is absolute, not relative — caller computes the wall/mono time and stamps it",
+    "a Query without a deadline has no upper bound; resolvers should still propagate cancellation",
+]
+
+# ---------------------------------------------------------------------------
+# Query
+# ---------------------------------------------------------------------------
 
 [types.Query]
 description = """
@@ -91,20 +322,124 @@ side_effect_free = true
 resolver_based = true
 transport_independent = true
 
+[types.Query.fields]
+resource = "Resource — the named target (a Subject)"
+selection = "Selection — optional filter predicate selecting a subset of the resource"
+arguments = "Option<serde_json::Value> — named arguments to the resolver"
+projection = "Option<Projection> — field set to include in the Response"
+context = "Context — execution context (deadline, principal, trace, cache policy, cancellation)"
+cache_policy = "Option<CachePolicy> — overrides the cache policy in Context"
+deadline = "Option<Deadline> — overrides the deadline in Context"
+
+# ---------------------------------------------------------------------------
+# Selection — filter + projection combined (per user decision 2026-08-19)
+# ---------------------------------------------------------------------------
+
+[types.Selection]
+description = """
+Optional filter predicate selecting a subset of a Resource. Carried in
+Query.selection. Combined with the optional Projection field, this forms
+the 'filter + projection' shape: Selection narrows which entities are
+returned, Projection narrows which fields of those entities are returned.
+A Query with selection = None returns all entities of the Resource.
+"""
+rust_type = """
+enum Selection {
+    All,
+    Filter(Predicate),
+}
+"""
+
+[types.Selection.Predicate]
+description = "A boolean predicate tree over resource fields."
+rust_type = """
+enum Predicate {
+    Field { path: FieldPath, op: Comparison, value: serde_json::Value },
+    And(Vec<Predicate>),
+    Or(Vec<Predicate>),
+    Not(Box<Predicate>),
+}
+enum Comparison { Eq, Ne, Lt, Le, Gt, Ge, In, Contains }
+"""
+constraints = [
+    "Predicate is serialisable (serde) so it can cross transports",
+    "And/Or/Not allow arbitrary nesting — resolvers may reject unsupported ops via Error::validation_error",
+    "FieldPath is a dot-joined path into the resource (e.g. 'position.x')",
+]
+
+[types.FieldPath]
+rust_type = """
+struct FieldPath {
+    segments: Vec<String>,
+}
+"""
+serde = "as a dot-joined string"
+
+# ---------------------------------------------------------------------------
+# Projection — field set
+# ---------------------------------------------------------------------------
+
+[types.Projection]
+description = """
+Optional field projection narrowing which fields of each selected
+entity appear in the Response. Carried in Query.projection. Combined
+with Selection (filter), this completes the 'filter + projection' shape.
+A Query with projection = None returns all fields.
+"""
+rust_type = """
+struct Projection {
+    include: Vec<FieldPath>,
+    exclude: Vec<FieldPath>,
+}
+"""
+constraints = [
+    "include and exclude are mutually exclusive — if both non-empty, Error::validation_error",
+    "include == [] && exclude == [] is treated the same as projection = None (return all)",
+    "FieldPath matches the same type used in Selection.Predicate",
+]
+
+# ---------------------------------------------------------------------------
+# Response — Result<Value, Error>, never both, never neither
+# ---------------------------------------------------------------------------
+
 [types.Response]
 description = """
 The result of a Query or Command. Carried inside a Message with
 operation = 'response'. A Response contains either a value or an Error;
 never both, never neither.
 """
-shape = "Result<Value, Error>"
+shape = "Result<ResponseValue, Error>"
 correlation_required = true
+
+[types.ResponseValue]
+rust_type = """
+enum ResponseValue {
+    Json(serde_json::Value),
+    Bytes(Vec<u8>, FormatTag),
+    Unit,
+}
+"""
+notes = "mirrors Payload but is a distinct type so transports can project independently"
+
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
 
 [types.Error]
 description = """
 The canonical error type. Transport adapters project this into
 GraphQL errors, MQTT error topics, SSE error frames, etc. Transport
 adapters must not define their own error types.
+"""
+rust_type = """
+struct Error {
+    code: ErrorCode,
+    message: String,
+    subject: Option<Subject>,
+    correlation_id: Option<CorrelationId>,
+    causation_id: Option<CausationId>,
+    details: Option<serde_json::Value>,
+}
 """
 fields = [
     "code",
@@ -115,6 +450,19 @@ fields = [
     "details"
 ]
 
+[types.ErrorCode]
+rust_type = """
+enum ErrorCode {
+    TransportError,
+    ResolverError,
+    CacheMiss,
+    ValidationError,
+    Timeout,
+    InternalError,
+}
+"""
+serde = "as a lowercase snake_case string"
+
 [types.Error.codes]
 transport_error = "transport-level failure"
 resolver_error = "resolver could not fulfil the query"
@@ -123,11 +471,24 @@ validation_error = "input failed validation"
 timeout = "deadline exceeded"
 internal_error = "unexpected internal failure"
 
+# ---------------------------------------------------------------------------
+# Context — execution context
+# ---------------------------------------------------------------------------
+
 [types.Context]
 description = """
 Execution context propagated through every query resolution and
 command dispatch. Carries deadline, auth principal, trace id,
 cache policy, and cancellation signal.
+"""
+rust_type = """
+struct Context {
+    deadline: Option<Deadline>,
+    principal: Option<Principal>,
+    trace_id: Option<TraceId>,
+    cache_policy: CachePolicy,
+    cancellation: Cancellation,
+}
 """
 fields = [
     "deadline",
@@ -137,14 +498,99 @@ fields = [
     "cancellation"
 ]
 
+# ---------------------------------------------------------------------------
+# CachePolicy — defined canonically here (referenced by query.toml, cache.toml)
+# ---------------------------------------------------------------------------
+
+[types.CachePolicy]
+description = """
+Policy controlling how a Query result is cached. Carried in Context
+and optionally overridden on Query.cache_policy. Canonical definition
+lives here; themql-cache consumes it.
+"""
+rust_type = """
+struct CachePolicy {
+    enabled: bool,
+    ttl: Option<Duration>,
+    tier_hint: Option<CacheTier>,
+    bypass: bool,
+    invalidation_hint: Option<InvalidationHint>,
+}
+"""
+fields = [
+    "enabled — if false, do not read from or write to any cache tier",
+    "ttl — explicit time-to-live; None means 'defer to tier default'",
+    "tier_hint — preferred tier for this query (L1..L4); None means 'tier decides'",
+    "bypass — if true, skip cache read but still write-through on miss",
+    "invalidation_hint — optional hint to the cache about when to invalidate",
+]
+
+[types.CacheTier]
+rust_type = """
+enum CacheTier {
+    L1,  // cachelito — process-local, ultra-low latency
+    L2,  // moka — process-local, low latency
+    L3,  // valkey — distributed, network latency
+    L4,  // helix-db — authoritative, persistent
+}
+"""
+
+[types.InvalidationHint]
+rust_type = """
+enum InvalidationHint {
+    OnSubjectChange(SubjectPattern),
+    AfterTtl(Duration),
+    Explicit,
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+[types.Cancellation]
+description = """
+Cancellation signal propagated through the resolution chain. A
+resolver must check cancellation before returning a result and return
+Error::Timeout (or a dedicated cancellation error) if cancelled.
+"""
+rust_type = """
+struct Cancellation {
+    cancelled: bool,
+}
+"""
+methods = [
+    "fn is_cancelled(&self) -> bool",
+    "fn cancel(&mut self)",
+]
+notes = """
+Phase 1 uses a simple bool flag. Phase 2 may upgrade to a token type
+backed by the runtime (tokio CancellationToken or embassy signal). The
+public API (is_cancelled / cancel) stays stable.
+"""
+
+# ---------------------------------------------------------------------------
+# Resource — named, addressable entity
+# ---------------------------------------------------------------------------
+
 [types.Resource]
 description = """
 A named, addressable entity in theMQL. Every Query targets a
 Resource. Resources have a hierarchical identity (e.g.
 'vehicle.sensors.imu.gyro').
 """
+rust_type = """
+struct Resource {
+    subject: Subject,
+}
+"""
 identity = "hierarchical_subject"
 addressable = true
+notes = "Resource is a thin wrapper over Subject; it exists to keep Query.resource self-documenting"
+
+# ---------------------------------------------------------------------------
+# Serialization
+# ---------------------------------------------------------------------------
 
 [serialization]
 explicit = true
@@ -152,6 +598,11 @@ serde_allowed = true
 binary_supported = true
 text_supported = true
 format_negotiable = true
+format_tagged = true  # payload carries its own format tag
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 [api]
 public_types = [
@@ -161,19 +612,35 @@ public_types = [
     "CausationId",
     "Operation",
     "Subject",
+    "SubjectSegment",
+    "SubjectPattern",
+    "PatternSegment",
     "Payload",
+    "FormatTag",
     "Metadata",
+    "TraceId",
+    "Principal",
+    "Timestamp",
+    "TimestampKind",
+    "Deadline",
     "Query",
     "Resource",
     "Selection",
+    "FieldPath",
+    "Predicate",
+    "Comparison",
     "Projection",
     "Response",
+    "ResponseValue",
     "Error",
     "ErrorCode",
     "Context",
     "CachePolicy",
-    "Deadline"
+    "CacheTier",
+    "InvalidationHint",
+    "Cancellation"
 ]
+
 traits = [
     "Resolver",
     "MessageHandler",
@@ -185,6 +652,15 @@ signature = "async fn resolve(&self, query: &Query, ctx: &Context) -> Result<Res
 
 [api.MessageHandler]
 signature = "async fn handle(&self, msg: &Message) -> Result<Response, Error>"
+
+[api.QueryExecutor]
+description = """
+Orchestrator around Resolver: applies caching, batching, deadline
+propagation, and cancellation checks. Defined in themql-query; declared
+here so transport adapters can depend on the trait without pulling
+themql-query as a hard dependency on every site that touches a Query.
+"""
+signature = "async fn execute(&self, query: &Query, ctx: &Context) -> Result<Response, Error>"
 
 [error_model]
 canonical = "themql_core::Error"
@@ -217,3 +693,8 @@ ownership_explicit = true
 clone_minimization = true
 response_contains_value_or_error_never_both = true
 response_contains_value_or_error_never_neither = true
+projection_include_and_exclude_mutually_exclusive = true
+selection_predicate_must_be_serialisable = true
+cache_policy_canonical_in_core = true
+subject_grammar_canonical_in_message_toml = true
+subject_type_canonical_in_core_toml = true

@@ -4,4 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "themql_gnc"
+path = "src/lib.rs"
+
 [dependencies]
+themql-core.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true

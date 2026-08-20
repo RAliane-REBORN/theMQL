@@ -36,7 +36,7 @@ authors = ["Metis Avionics"]
 tokio = "1"
 rayon = "1"
 apalis = "0.6"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Transport / API
@@ -57,10 +57,17 @@ polars = "0.55"
 # ML
 tch = "0.24"
 ndarray = "0.17"
+nalgebra = "0.35"
 
 # Tooling
 clap = "4"
 ratatui = "0.30"
+serde-big-array = "0.5"
+
+# Identity / hashing
+uuid = { version = "1", features = ["v7", "serde"] }
+blake3 = "1"
+thiserror = "2"
 
 # Internal crates — self-references for cross-crate deps via workspace=true
 themql-core = { path = "crates/themql-core" }

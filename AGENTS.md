@@ -142,17 +142,20 @@ See `TETANUS.md` for the full rationale and enforcement mechanisms.
 ## Dependency policy (use these, do not rebuild them)
 
 async-graphql · embassy · apalis · rayon · cachelito (L1) · moka (L2) ·
-valkey (L3) · helix-db (L4 + storage) · dioxus · polars · tch · ndarray ·
-clap · ratatui
+valkey (L3) · helix-db (L4 + storage) · dioxus · polars · tch · ndarray
+(raw ML-side buffers only) · nalgebra (conventional numerics, incl.
+quaternion) · clap · ratatui
 
 Workspace dep versions in `Cargo.toml [workspace.dependencies]` are
 **resolved against crates.io** (2026-08-19). Prefer
 `dep.workspace = true` in crate Cargo.tomls over repeating versions.
 
-Note: `tch` is the crate name (published as `tch`, not `tch-rs`). `helix-db`
-is the crate name (not `helixdb`). `valkey` is alpha
+Note: `tch` is the crate name (published as `tch`, not `tch-rs`).
+`helix-db` is the crate name (not `helixdb`). `valkey` is alpha
 (`0.0.0-alpha5`); `cachelito` is a proc-macro for function caching — both
-may need reassessment in Phase 1.
+may need reassessment in Phase 1. `nalgebra` 0.35 is the canonical
+library for conventional numerical computation (EKF, covariance,
+quaternion); `ndarray` is retained only for raw ML-side array buffers.
 
 ## Workspace layout (19 crates, 2 binaries)
 
