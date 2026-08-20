@@ -82,6 +82,9 @@ async-graphql-axum = "8.0.0-rc.5"
 rumqttc = "0.24"
 futures-util = "0.3"
 
+# Auth
+better-auth = { version = "0.10", features = ["axum", "rustls"], default-features = false }
+
 # Internal crates — self-references for cross-crate deps via workspace=true
 themql-core = { path = "crates/themql-core" }
 themql-schema = { path = "crates/themql-schema" }

@@ -241,7 +241,9 @@ where
 
 /// Configuration for a [`RumqttcTransport`]. All fields are explicit so
 /// that reconnect behaviour is caller-owned, never implicit (per
-/// `specs/mqtt.toml [constraints] implicit_reconnect = false`).
+/// `specs/mqtt.toml [constraints] implicit_reconnect = false`). Per
+/// `specs/auth.toml [authn.mqtt]`, broker credentials are carried as
+/// optional username/password fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RumqttcConfig {
     /// Broker hostname or IP address.
@@ -256,12 +258,17 @@ pub struct RumqttcConfig {
     /// the caller is responsible for re-polling the event loop after a
     /// connection error.
     pub auto_reconnect: bool,
+    /// Optional broker username for SASL authentication.
+    pub username: Option<String>,
+    /// Optional broker password for SASL authentication.
+    pub password: Option<String>,
 }
 
 impl RumqttcConfig {
     /// Construct a config with the given broker endpoint and client id,
     /// defaulting `keep_alive` to 60 s and `auto_reconnect` to `false`
     /// (matching `specs/mqtt.toml [constraints] implicit_reconnect`).
+    /// Credentials default to `None`.
     #[must_use]
     pub fn new(host: impl Into<String>, port: u16, client_id: impl Into<String>) -> Self {
         Self {
@@ -270,6 +277,8 @@ impl RumqttcConfig {
             client_id: client_id.into(),
             keep_alive: Duration::from_mins(1),
             auto_reconnect: false,
+            username: None,
+            password: None,
         }
     }
 
@@ -287,10 +296,27 @@ impl RumqttcConfig {
         self
     }
 
+    /// Set broker credentials for SASL authentication. Per
+    /// `specs/auth.toml [authn.mqtt]`, credentials must not appear in
+    /// source; pass values from env or config.
+    #[must_use]
+    pub fn with_credentials(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.username = Some(username.into());
+        self.password = Some(password.into());
+        self
+    }
+
     /// Build a `rumqttc::MqttOptions` from this config.
     fn to_mqtt_options(&self) -> MqttOptions {
         let mut opts = MqttOptions::new(self.client_id.clone(), self.host.clone(), self.port);
         opts.set_keep_alive(self.keep_alive);
+        if let (Some(u), Some(p)) = (&self.username, &self.password) {
+            opts.set_credentials(u.clone(), p.clone());
+        }
         opts
     }
 }
@@ -609,6 +635,8 @@ mod tests {
         assert_eq!(cfg.client_id, "themql-1");
         assert_eq!(cfg.keep_alive, Duration::from_mins(1));
         assert!(!cfg.auto_reconnect);
+        assert!(cfg.username.is_none());
+        assert!(cfg.password.is_none());
     }
 
     #[test]
@@ -672,5 +700,30 @@ mod tests {
     fn matches_filter_multi_level_wildcard() {
         assert!(matches_filter("vehicle/#", "vehicle/sensors/imu/gyro"));
         assert!(matches_filter("vehicle/#", "vehicle"));
+    }
+
+    #[test]
+    fn rumqttc_config_with_credentials_sets_username_password() {
+        let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1")
+            .with_credentials("operator", "s3cret");
+        assert_eq!(cfg.username.as_deref(), Some("operator"));
+        assert_eq!(cfg.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn rumqttc_config_credentials_appear_in_mqtt_options() {
+        let cfg =
+            RumqttcConfig::new("broker.local", 1883, "themql-1").with_credentials("admin", "pass");
+        let opts = cfg.to_mqtt_options();
+        let (u, p) = opts.credentials().unwrap_or((String::new(), String::new()));
+        assert_eq!(u, "admin");
+        assert_eq!(p, "pass");
+    }
+
+    #[test]
+    fn rumqttc_config_without_credentials_has_no_credentials_in_options() {
+        let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1");
+        let opts = cfg.to_mqtt_options();
+        assert!(opts.credentials().is_none());
     }
 }
