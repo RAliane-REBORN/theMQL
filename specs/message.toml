@@ -1,0 +1,60 @@
+[subsystem]
+name = "message"
+crate = "themql-message"
+domain = "core"
+semantic_owner = false
+subordinate_to = "specs/core.toml"
+
+[purpose]
+description = """
+Message routing, subject hierarchy, and serialisation specialisation.
+The canonical Message type, its fields, identity, and operations are
+defined in specs/core.toml. This file specialises how Messages are
+routed and serialised; it does not redefine the Message type.
+"""
+
+[references]
+canonical = "specs/core.toml"
+
+[routing]
+subject_based = true
+hierarchical_subjects = true
+transport_independent = true
+wildcards_supported = true
+
+[routing.subject_syntax]
+separator = "."
+example = "vehicle.sensors.imu.gyro"
+wildcard_single = "+ matches one segment"
+wildcard_multi = "# matches zero or more segments"
+
+[routing.subject_resolution]
+one_subject = "exactly one Message subject"
+case_sensitive = true
+trailing_separator_forbidden = true
+
+[serialization]
+explicit = true
+serde_allowed = true
+binary_supported = true
+text_supported = true
+format_negotiable = true
+format_tagged = true
+
+[serialization.formats]
+json = "default text format"
+bincode = "default binary format"
+custom = "allowed only when spec-required; must be explicit in Message metadata"
+
+[identity]
+correlation = true
+causation = true
+correlation_required_for_response = true
+causation_required_for_event = true
+
+[constraints]
+no_transport_specific_message_type = true
+no_duplicate_message_model = true
+ownership_explicit = true
+clone_minimization = true
+routing_business_logic_in_transport = false

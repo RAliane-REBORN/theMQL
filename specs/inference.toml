@@ -1,0 +1,50 @@
+[subsystem]
+name = "inference"
+crate = "themql-inference"
+domain = "embedded"
+
+[purpose]
+description = """
+Embedded model execution: PINN inference, sparse inference,
+Bayesian update, and constrained online adaptation under
+explicit resource budgets and rollback rules.
+"""
+
+[framework]
+primary = "tch-rs"
+
+[capabilities]
+pinn_inference = true
+sparse_inference = true
+bayesian_update = true
+online_adaptation = true
+
+[online]
+adaptation = true
+training = true
+resource_budget_required = true
+rollback_required = true
+
+[model_artifact]
+crate = "themql-artifact"
+versioned = true
+hash_required = true
+schema_required = true
+validation_before_activation = true
+previous_model_retained = true
+failed_activation_reverts = true
+
+[authority]
+flight_control = false
+primary_ekf = false
+state_correction = true
+anomaly_detection = true
+prediction = true
+
+[constraints]
+ml_must_not_be_required_for_basic_flight = true
+unvalidated_model_activation = false
+model_schema_mismatch = false
+validation_bypass = false
+training_without_budget = false
+rollback_without_retained_previous = false

@@ -1,0 +1,46 @@
+[subsystem]
+name = "gnc"
+crate = "themql-gnc"
+domain = "embedded"
+
+[architecture]
+guidance = true
+navigation = true
+control = true
+
+[state]
+attitude_representation = "quaternion"
+position_representation = "cartesian"
+velocity_representation = "cartesian"
+
+[controllers]
+pid = true
+lqri = true
+hybrid_lqri_pid = true
+
+[pid]
+enabled = true
+deterministic = true
+
+[lqri]
+enabled = true
+deterministic = true
+
+[hybrid]
+enabled = true
+deterministic = true
+switching_policy_explicit = true
+
+[safety]
+ml_control_authority = false
+deterministic_fallback = true
+controller_health_monitoring = true
+
+[numerics]
+ndarray_allowed = true
+tch_rs_in_control_loop = false
+
+[constraints]
+euler_angles_in_control_loop = false
+gimbal_lock_prone_representation = false
+implicit_controller_switching = false

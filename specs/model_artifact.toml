@@ -1,0 +1,120 @@
+[subsystem]
+name = "model_artifact"
+crate = "themql-artifact"
+purpose = "Validated transfer of trained models from desktop to embedded"
+
+[artifact]
+versioned = true
+hash_required = true
+schema_required = true
+
+[metadata]
+model_id = true
+training_version = true
+dataset_version = true
+feature_schema = true
+normalization = true
+validation_metrics = true
+pruning_metadata = true
+
+[compatibility]
+runtime_version = true
+architecture_version = true
+tensor_schema = true
+
+[deployment]
+desktop_export = true
+embedded_import = true
+validation_before_activation = true
+
+[rollback]
+previous_model_retained = true
+failed_activation_reverts = true
+
+[api]
+public_traits = [
+    "ArtifactValidator",
+    "ArtifactLoader",
+    "ArtifactWriter"
+]
+
+[api.ArtifactValidator]
+description = "Validates an artifact's integrity, schema, and compatibility before activation"
+methods = [
+    "fn validate(&self, artifact: &ModelArtifact) -> Result<ValidationReport, ArtifactError>",
+    "fn check_compatibility(&self, artifact: &ModelArtifact, target: &RuntimeInfo) -> Result<(), ArtifactError>"
+]
+
+[api.ArtifactLoader]
+description = "Loads a validated artifact into the embedded inference runtime"
+methods = [
+    "fn load(&self, path: &Path) -> Result<ModelArtifact, ArtifactError>",
+    "fn activate(&self, artifact: &ModelArtifact) -> Result<ActivationHandle, ArtifactError>"
+]
+
+[api.ArtifactWriter]
+description = "Writes a trained model to an artifact on the desktop side"
+methods = [
+    "fn write(&self, model: &TrainedModel, metadata: &ArtifactMetadata) -> Result<ModelArtifact, ArtifactError>"
+]
+
+[validation_pipeline]
+steps = [
+    "hash_verify",
+    "schema_validate",
+    "compatibility_check",
+    "integrity_check"
+]
+order_required = true
+short_circuit_on_failure = true
+
+[validation_pipeline.hash_verify]
+description = "SHA-256 hash of artifact bytes matches metadata.hash"
+
+[validation_pipeline.schema_validate]
+description = "Feature schema, normalization, and tensor schema match declared metadata"
+
+[validation_pipeline.compatibility_check]
+description = "Runtime version, architecture version, and tensor schema compatible with target"
+
+[validation_pipeline.integrity_check]
+description = "Weights, biases, and structure intact; no truncation or corruption"
+
+[error_model]
+variants = [
+    "HashMismatch",
+    "SchemaMismatch",
+    "IncompatibleRuntime",
+    "IncompatibleArchitecture",
+    "CorruptedArtifact",
+    "MissingMetadata",
+    "ValidationFailed",
+    "ActivationFailed",
+    "RollbackFailed"
+]
+propagation = "Result<T, ArtifactError>"
+no_silent_activation = true
+no_bypass = true
+
+[lifecycle]
+desktop_export = "themql-training writes artifact via ArtifactWriter"
+transfer = "artifact file transferred to embedded target (mechanism out of scope)"
+embedded_import = "themql-inference loads via ArtifactLoader"
+validation = "ArtifactValidator runs full validation_pipeline before activation"
+activation = "validated artifact activated; previous model retained"
+rollback = "on activation failure, previous model restored automatically"
+
+[threading]
+send_required = true
+sync_optional = true
+validation_sync = true
+activation_atomic = true
+rollback_atomic = true
+
+[constraints]
+arbitrary_model_activation = false
+schema_bypass = false
+validation_bypass = false
+activation_without_previous_retained = false
+training_code_in_artifact = false
+inference_code_in_artifact = false

@@ -1,0 +1,87 @@
+[subsystem]
+name = "graphql"
+crate = "themql-graphql"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+GraphQL projection of theMQL's core query model. async-graphql is the
+sole GraphQL implementation. GraphQL types are generated from or mapped
+to themql-core / themql-query types; GraphQL-specific types must not
+escape this crate.
+"""
+
+[references]
+related = [
+    "specs/core.toml",
+    "specs/query.toml",
+    "specs/transport.toml"
+]
+
+[implementation]
+library = "async-graphql"
+version = "8.0.0-rc.5"
+role = "graphql_projection_of_query_model"
+
+[schema_generation]
+source = "themql-core types + themql-query Resolver trait"
+strategy = "explicit mapping — each core type has a GraphQL counterpart defined in this crate"
+auto_generated = false
+graphql_first = false
+
+[schema_generation.rules]
+core_types_must_not_be_graphql_types = true
+graphql_types_must_not_leak_into_core = true
+resolver_trait_is_the_boundary = true
+
+[api]
+public_traits = [
+    "GraphqlSchema",
+    "GraphqlResolverBridge"
+]
+
+[api.GraphqlSchema]
+description = "Built async-graphql Schema, ready to serve"
+methods = [
+    "fn schema(&self) -> &async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>"
+]
+
+[api.GraphqlResolverBridge]
+description = "Bridge that maps a GraphQL field resolution to a themql-core Resolver call"
+methods = [
+    "async fn resolve_field(&self, field: &str, args: &serde_json::Value, ctx: &Context) -> Result<serde_json::Value, Error>"
+]
+
+[mapping]
+"Message" = "GraphQL type generated in this crate"
+"Query" = "GraphQL Query root field"
+"Response" = "GraphQL field return value"
+"Error" = "GraphQL error extension"
+"Context" = "GraphQL context extension"
+
+[error_model]
+graphql_error = "async_graphql::Error"
+mapping_to_core_error = "async_graphql::Error -> themql_core::Error"
+mapping_from_core_error = "themql_core::Error -> async_graphql::Error"
+no_duplicate_error_type = true
+
+[lifecycle]
+request = "async-graphql receives HTTP/WS request, invokes resolver bridge"
+resolution = "bridge calls themql-core Resolver with Context"
+response = "resolver returns Result<Response, Error>; bridge maps to GraphQL response"
+subscription = "async-graphql Subscription maps to themql-message Stream"
+cancellation = "Context.cancellation propagates to resolver"
+
+[threading]
+send_required = true
+sync_optional = true
+async_required = true
+schema_build_cost = "once at startup, cached"
+request_cost = "per-request, no global mutable state"
+
+[constraints]
+graphql_types_must_not_be_core_types = true
+transport_types_must_not_escape_adapter = true
+custom_graphql_engine = false
+business_logic_in_transport = false
+duplicate_query_model = false

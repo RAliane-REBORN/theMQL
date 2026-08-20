@@ -1,0 +1,37 @@
+[subsystem]
+name = "telemetry"
+crate = "themql-telemetry"
+
+[message]
+first_class = true
+schema_versioned = true
+timestamped = true
+sequence_numbered = true
+
+[data]
+sensor_values = true
+state_estimate = true
+covariance = true
+controller_state = true
+model_state = true
+diagnostics = true
+
+[sources]
+gps = "NEO-6M"
+barometer = "BME280"
+imu = "GY-LSM6DS3"
+
+[transport]
+mqtt = true
+sse = true
+graphql = true
+
+[analysis]
+polars = true
+
+[storage]
+helixdb = true
+
+[constraints]
+telemetry_schema_is_canonical = true
+transport_must_not_redefine_telemetry = true

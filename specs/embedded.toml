@@ -1,0 +1,46 @@
+[subsystem]
+name = "embedded"
+crate = "themql-embedded"
+binary = "themql-embedded"
+
+[runtime]
+framework = "embassy"
+
+[mqtt]
+enabled = true
+implementation = "embassy"
+
+[sensors]
+gps = "NEO-6M"
+barometer = "BME280"
+imu = "GY-LSM6DS3"
+
+[state_estimation]
+ekf = true
+bayesian = true
+quaternion = true
+
+[gnc]
+pid = true
+lqri = true
+hybrid_lqri_pid = true
+
+[inference]
+crate = "themql-inference"
+pinn_inference = true
+sparse_inference = true
+online_adaptation = true
+
+[deployment]
+model_artifacts = true
+runtime_validation = true
+rollback = true
+
+[constraints]
+dioxus = false
+polars = false
+helixdb = false
+valkey = false
+thedaf = false
+desktop_training = false
+flight_control_requires_ml = false

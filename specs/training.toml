@@ -1,0 +1,52 @@
+[subsystem]
+name = "training"
+crate = "themql-training"
+domain = "desktop"
+
+[purpose]
+description = """
+Desktop-only model creation: training, fine tuning, pruning,
+sparsification, and artifact generation. Models are exported as
+validated artifacts for the embedded inference crate.
+"""
+
+[framework]
+primary_tensor_framework = "tch-rs"
+secondary_numeric_framework = "ndarray"
+
+[capabilities]
+dense_training = true
+pinn_training = true
+deep_learning = true
+gradient_boosting = true
+fine_tuning = true
+pruning = true
+sparsification = true
+artifact_generation = true
+
+[pinn]
+enabled = true
+dense_training = true
+physics_constraints = true
+
+[numerics]
+tch_rs_allowed = true
+ndarray_for_conventional_linear_algebra = true
+
+[deployment]
+desktop_only = true
+embedded_training = false
+
+[artifact]
+crate = "themql-artifact"
+versioned = true
+hash_required = true
+schema_required = true
+validation_metadata_required = true
+
+[constraints]
+training_must_not_run_on_embedded = true
+unvalidated_model_export = false
+model_schema_bypass = false
+validation_bypass = false
+ml_required_for_basic_flight = false

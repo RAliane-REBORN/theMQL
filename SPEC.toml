@@ -1,0 +1,244 @@
+[project]
+name = "theMQL"
+full_name = "The Message Query Language"
+version = "0.1.0"
+status = "greenfield"
+language = "rust"
+license = "MIT"
+
+description = """
+Native Rust message-query runtime for desktop, distributed, telemetry,
+analysis, AI, GNC, and embedded systems.
+
+TheMQL defines a common message and query execution model. External
+protocols and applications are projections of that model rather than
+independent semantic systems.
+"""
+
+[architecture]
+primary_primitive = "message"
+secondary_primitive = "query"
+execution_model = "message_query_runtime"
+semantic_owner = "themql-core"
+
+[architecture.principles]
+native_rust_first = true
+composition_over_reimplementation = true
+dependency_first = true
+explicit_boundaries = true
+transport_agnostic_core = true
+storage_agnostic_core = true
+cache_aware = true
+async_first = true
+embedded_capable = true
+desktop_capable = true
+zero_copy_when_safe = true
+deterministic_safety_critical_paths = true
+
+[architecture.forbidden]
+python_runtime = true
+python_abi = true
+typescript_runtime = true
+custom_message_queue = true
+custom_cache_engine = true
+custom_graphql_engine = true
+custom_database_engine = true
+unnecessary_abstraction_layers = true
+transport_business_logic = true
+storage_business_logic = true
+ai_required_for_basic_gnc = true
+ml_required_for_basic_state_estimation = true
+
+[dependencies]
+graphql = "async-graphql"
+message_queue = "apalis"
+mqtt = "embassy"
+parallelism = "rayon"
+
+l1_cache = "cachelito"
+l2_cache = "moka"
+l3_cache = "valkey"
+l4_cache = "helixdb"
+database = "helixdb"
+
+desktop_ui = "dioxus"
+dataframe = "polars"
+
+ml_tensor = "tch-rs"
+ml_numerics = "ndarray"
+
+cli = "clap"
+tui = "ratatui"
+
+[workspace]
+desktop_binary = "themql-desktop"
+embedded_binary = "themql-embedded"
+
+[workspace.crates]
+core = "themql-core"
+message = "themql-message"
+query = "themql-query"
+runtime = "themql-runtime"
+cache = "themql-cache"
+storage = "themql-storage"
+transport = "themql-transport"
+graphql = "themql-graphql"
+mqtt = "themql-mqtt"
+sse = "themql-sse"
+telemetry = "themql-telemetry"
+analysis = "themql-analysis"
+training = "themql-training"
+inference = "themql-inference"
+artifact = "themql-artifact"
+gnc = "themql-gnc"
+state_estimation = "themql-estimation"
+embedded = "themql-embedded"
+desktop = "themql-desktop"
+
+[integration.thedaf]
+repository = "Metis-Avionics/theDAF"
+role = "background_analysis_and_data_access"
+authority = "integration_only"
+core_dependency = false
+embedded_dependency = false
+migration_target = true
+
+[execution.desktop]
+runtime = "tokio"
+parallelism = "rayon"
+ui = "dioxus"
+analysis = "polars"
+training = "tch-rs"
+
+[execution.embedded]
+runtime = "embassy"
+mqtt = "embassy"
+allocation = "minimized"
+no_std_capable = true
+
+[message]
+identity_required = true
+timestamp_required = true
+subject_required = true
+operation_required = true
+metadata_required = true
+payload_explicit = true
+serialization_explicit = true
+correlation_supported = true
+causation_supported = true
+
+[query]
+resource_oriented = true
+resolver_based = true
+cache_aware = true
+transport_independent = true
+side_effect_free = true
+
+[cache]
+tiers = ["L1", "L2", "L3", "L4"]
+authority = "L4"
+
+[cache.L1]
+implementation = "cachelito"
+scope = "process"
+
+[cache.L2]
+implementation = "moka"
+scope = "process"
+
+[cache.L3]
+implementation = "valkey"
+scope = "distributed"
+
+[cache.L4]
+implementation = "helixdb"
+scope = "authoritative"
+
+[transport]
+mqtt = true
+graphql = true
+sse = true
+mqtt_graphql_bridge = true
+mqtt_sse_bridge = true
+
+[telemetry]
+first_class_message = true
+timestamped = true
+sequence_numbered = true
+schema_versioned = true
+covariance_supported = true
+diagnostics_supported = true
+
+[gnc]
+enabled = true
+quaternion_attitude = true
+gimbal_lock_avoidance = true
+pid = true
+lqri = true
+hybrid_lqri_pid = true
+
+[state_estimation]
+ekf = true
+bayesian_update = true
+bayesian_sampling = true
+sensor_fusion = true
+
+[ml]
+authority_section = "see [ml.authority]"
+
+[ml.training]
+desktop_only = true
+framework = "tch-rs"
+pinn = true
+deep_learning = true
+gradient_boosting = true
+fine_tuning = true
+pruning = true
+sparsification = true
+artifact_generation = true
+
+[ml.inference]
+embedded_capable = true
+framework = "tch-rs"
+pinn_inference = true
+sparse_inference = true
+online_adaptation = true
+resource_budget_required = true
+rollback_required = true
+
+[ml.authority]
+basic_flight_stability = "deterministic_control"
+primary_state_estimation = "ekf"
+ml_state_correction = "augmentative"
+ml_control_authority = "forbidden"
+
+[ml.artifact]
+versioned = true
+hash_required = true
+schema_required = true
+validation_before_activation = true
+previous_model_retained = true
+failed_activation_reverts = true
+
+[sensors]
+gps = "NEO-6M"
+barometer = "BME280"
+imu = "GY-LSM6DS3"
+
+[quality]
+format_check_required = true
+compile_check_required = true
+tests_required = true
+integration_tests_required = true
+property_tests_required = true
+clippy_required = true
+documentation_required_for_public_api = true
+benchmark_hot_paths = true
+unsafe_requires_justification = true
+
+[safety]
+safety_critical_paths_explicit = true
+ml_failure_must_degrade_gracefully = true
+sensor_failure_must_be_detectable = true
+estimator_failure_must_be_detectable = true
+controller_failure_must_be_detectable = true

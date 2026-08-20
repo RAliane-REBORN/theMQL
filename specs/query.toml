@@ -1,0 +1,53 @@
+[subsystem]
+name = "query"
+crate = "themql-query"
+domain = "core"
+semantic_owner = false
+subordinate_to = "specs/core.toml"
+
+[purpose]
+description = """
+Query resolution, caching, and transport projection specialisation.
+The canonical Query type and its semantics are defined in
+specs/core.toml. This file specialises how Queries are resolved,
+cached, and projected to transports; it does not redefine the Query
+type.
+"""
+
+[references]
+canonical = "specs/core.toml"
+
+[resolution]
+parallel = true
+batching = true
+cancellation = true
+deadline_propagation = true
+resolver_based = true
+
+[resolution.resolver_trait]
+defined_in = "specs/core.toml [api.Resolver]"
+signature = "async fn resolve(&self, query: &Query, ctx: &Context) -> Result<Response, Error>"
+
+[cache]
+cacheable = true
+deterministic_key = true
+explicit_invalidation = true
+policy_in_context = true
+
+[cache.key]
+derived_from = ["resource", "selection", "arguments"]
+deterministic = true
+hash_stable = true
+
+[transport_projections]
+graphql = "see specs/graphql.toml"
+mqtt = "see specs/mqtt.toml"
+sse = "see specs/sse.toml"
+
+[constraints]
+read_only = true
+side_effect_free = true
+transport_independent = true
+graphql_types_must_not_be_core_types = true
+transport_types_must_not_escape_adapter = true
+duplicate_query_model = false

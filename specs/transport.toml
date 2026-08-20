@@ -1,0 +1,41 @@
+[subsystem]
+name = "transport"
+crate = "themql-transport"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+Cross-cutting transport specification. Per-transport detail lives in
+subordinate specs (mqtt.toml, graphql.toml, sse.toml). This file defines
+the principle, the bridge table, and the cross-cutting constraints that
+all transports must obey.
+"""
+
+[references]
+subspecs = [
+    "specs/mqtt.toml",
+    "specs/graphql.toml",
+    "specs/sse.toml"
+]
+
+[principle]
+transport_is_projection = true
+transport_is_not_semantic_owner = true
+transport_contains_business_logic = false
+
+[bridges]
+mqtt_to_graphql = true
+graphql_to_mqtt = true
+mqtt_to_sse = true
+graphql_to_sse = true
+
+[bridges.semantics]
+one_internal_model = true
+no_cross_adapter_direct_coupling = true
+bridge_route = "via themql-core Message, never adapter-to-adapter"
+
+[constraints]
+business_logic_in_transport = false
+duplicate_routing_logic = false
+transport_specific_domain_model = false
+transport_types_must_not_escape_adapter = true

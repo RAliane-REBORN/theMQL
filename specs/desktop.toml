@@ -1,0 +1,46 @@
+[subsystem]
+name = "desktop"
+crate = "themql-desktop"
+binary = "themql-desktop"
+
+[ui]
+framework = "dioxus"
+
+[api]
+graphql = "async-graphql"
+sse = true
+mqtt = true
+
+[analysis]
+polars = true
+thedaf_integration = true
+rayon = true
+
+[training]
+crate = "themql-training"
+tch_rs = true
+gradient_boosting = true
+pinn = true
+fine_tuning = true
+pruning = true
+artifact_generation = true
+
+[storage]
+helixdb = true
+valkey = true
+
+[cache]
+l1 = true
+l2 = true
+l3 = true
+
+[cli]
+clap = true
+
+[tui]
+ratatui = true
+
+[constraints]
+embedded_dependencies = false
+flight_control_authority = false
+training_on_embedded = false

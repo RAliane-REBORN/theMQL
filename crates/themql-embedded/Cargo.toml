@@ -1,0 +1,11 @@
+[package]
+name = "themql-embedded"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "themql-embedded"
+path = "src/main.rs"
+
+[dependencies]
