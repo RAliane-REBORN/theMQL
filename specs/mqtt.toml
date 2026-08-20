@@ -24,6 +24,7 @@ embedded_executor = "embassy-executor"
 synchronization = "embassy-sync"
 desktop_runtime = "tokio"
 desktop_client = "rumqttc"
+embedded_client = "minimq 0.13 (MQTT v5, no_std, async, embedded-io-async + embassy-time)"
 role = "mqtt_transport_projection"
 
 [topics]

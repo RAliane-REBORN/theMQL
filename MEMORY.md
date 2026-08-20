@@ -463,3 +463,12 @@ real backends (see Phase 3 progress above). Follow-ups (not blockers):
   `stream::unfold`/`Stream`). `serve_sse` returns an `axum::Router`
   with `GET /events` honoring `Last-Event-ID`; replay log cap
   `REPLAY_LOG_CAPACITY = 256` per subject.
+- 2026-08-20: Dependabot audit — 6 alerts on default branch, all
+  non-exploitable in our usage (4× rustls-webpki CRL/X.509 code paths
+  we never activate, 1× jsonwebtoken type confusion on a JWT-issuance
+  path better-auth doesn't use, 1× lru IterMut Stacked-Borrows
+  violation). `lru` bumped 0.12.5 → 0.18.2 (dedup + fixes
+  RUSTSEC-2026-0002/0253). 6 advisories ignored in `deny.toml` with
+  precise reasons. See `SECURITY.md` "Dependabot Alert Dismissal
+  Rationale" for the full table. GitHub UI dismissal is a manual
+  follow-up.

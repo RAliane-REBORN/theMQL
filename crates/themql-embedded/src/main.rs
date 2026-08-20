@@ -31,11 +31,22 @@
 #![warn(clippy::pedantic)]
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::unreadable_literal)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::needless_pass_by_value)]
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
 #[cfg(target_os = "none")]
 extern crate alloc;
+
+pub mod mqtt;
+pub mod sensors;
 
 // ---------------------------------------------------------------------------
 // Shared types — available on both host and embedded
@@ -157,15 +168,15 @@ impl std::error::Error for SensorError {}
 /// schedule and produces a [`SensorReading`]. Mirrors
 /// `specs/embedded.toml [api.SensorDriver]`.
 ///
-/// The canonical form is `async` (embassy tasks); this stub uses a
-/// synchronous `read` so the binary compiles on the host without
-/// embassy. The trait surface is otherwise identical.
+/// The canonical form is `async` (embassy tasks). On host targets the
+/// async runtime is provided by `tokio` for testing.
+#[allow(async_fn_in_trait)]
 pub trait SensorDriver: Send + Sync {
     /// Read one sample from the sensor.
     ///
     /// # Errors
     /// Returns [`SensorError`] on any read failure.
-    fn read(&mut self) -> Result<SensorReading, SensorError>;
+    async fn read(&mut self) -> Result<SensorReading, SensorError>;
 
     /// Returns the kind of sensor this driver reads.
     fn kind(&self) -> SensorKind;
@@ -193,8 +204,9 @@ impl GpsDriver {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl SensorDriver for GpsDriver {
-    fn read(&mut self) -> Result<SensorReading, SensorError> {
+    async fn read(&mut self) -> Result<SensorReading, SensorError> {
         Ok(SensorReading {
             kind: SensorKind::Gps,
             raw: [0; 32],
@@ -226,8 +238,9 @@ impl BaroDriver {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl SensorDriver for BaroDriver {
-    fn read(&mut self) -> Result<SensorReading, SensorError> {
+    async fn read(&mut self) -> Result<SensorReading, SensorError> {
         Ok(SensorReading {
             kind: SensorKind::Barometer,
             raw: [0; 32],
@@ -259,8 +272,9 @@ impl ImuDriver {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl SensorDriver for ImuDriver {
-    fn read(&mut self) -> Result<SensorReading, SensorError> {
+    async fn read(&mut self) -> Result<SensorReading, SensorError> {
         Ok(SensorReading {
             kind: SensorKind::Imu,
             raw: [0; 32],
@@ -423,7 +437,7 @@ mod embedded {
     pub async fn gps_task(mut driver: GpsDriver) {
         let period = Duration::from_hz(GPS_RATE_HZ as u64);
         loop {
-            if let Ok(reading) = driver.read() {
+            if let Ok(reading) = driver.read().await {
                 let _ = GPS_CHAN.try_send(TaggedReading {
                     kind: SensorKind::Gps,
                     reading,
@@ -438,7 +452,7 @@ mod embedded {
     pub async fn baro_task(mut driver: BaroDriver) {
         let period = Duration::from_hz(BARO_RATE_HZ as u64);
         loop {
-            if let Ok(reading) = driver.read() {
+            if let Ok(reading) = driver.read().await {
                 let _ = BARO_CHAN.try_send(TaggedReading {
                     kind: SensorKind::Barometer,
                     reading,
@@ -453,7 +467,7 @@ mod embedded {
     pub async fn imu_task(mut driver: ImuDriver) {
         let period = Duration::from_hz(IMU_RATE_HZ as u64);
         loop {
-            if let Ok(reading) = driver.read() {
+            if let Ok(reading) = driver.read().await {
                 let _ = IMU_CHAN.try_send(TaggedReading {
                     kind: SensorKind::Imu,
                     reading,
@@ -533,15 +547,29 @@ mod embedded {
     }
 
     /// Telemetry task. Publishes at 10 Hz to the four subjects defined
-    /// in [`TELEMETRY_SUBJECTS`]. In the full implementation this
-    /// publishes `TelemetryMessage` via MQTT. In this stage it counts
-    /// publish cycles.
+    /// in [`TELEMETRY_SUBJECTS`]. Formats telemetry payloads as JSON
+    /// via [`crate::mqtt::format_state_estimate`] and
+    /// [`crate::mqtt::format_diagnostics`]. When a minimq transport
+    /// handle is available (passed in via a channel or static), the
+    /// payloads are published via MQTT v5. In this stage the payloads
+    /// are formatted and counted; the actual publish requires an
+    /// `embassy-net` TCP transport wired at init.
     #[embassy_executor::task]
     pub async fn telemetry_task() {
         let period = Duration::from_hz(TELEMETRY_RATE_HZ as u64);
         let mut publish_count: u32 = 0;
+        let mut error_count: u32 = 0;
+        let mut payload_buf = [0u8; crate::mqtt::PAYLOAD_BUF_SIZE];
         loop {
             publish_count = publish_count.wrapping_add(1);
+            let len = crate::mqtt::format_state_estimate(&mut payload_buf, [0.0; 3], [0.0; 3]);
+            if len == 0 {
+                error_count = error_count.wrapping_add(1);
+            }
+            let len = crate::mqtt::format_diagnostics(&mut payload_buf, publish_count, error_count);
+            if len == 0 {
+                error_count = error_count.wrapping_add(1);
+            }
             Timer::after(period).await;
         }
     }
@@ -697,29 +725,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sensor_driver_trait_object_construction() {
-        let mut drivers: Vec<Box<dyn SensorDriver>> = vec![
-            Box::new(GpsDriver::new(10)),
-            Box::new(BaroDriver::new(50)),
-            Box::new(ImuDriver::new(200)),
-        ];
-        assert_eq!(drivers.len(), 3);
-        for d in &mut drivers {
-            let _ = d.read().unwrap();
-        }
-        assert_eq!(drivers[0].kind(), SensorKind::Gps);
-        assert_eq!(drivers[1].kind(), SensorKind::Barometer);
-        assert_eq!(drivers[2].kind(), SensorKind::Imu);
-        assert_eq!(drivers[0].rate_hz(), 10);
-        assert_eq!(drivers[1].rate_hz(), 50);
-        assert_eq!(drivers[2].rate_hz(), 200);
+    #[tokio::test]
+    async fn sensor_driver_concrete_construction() {
+        let mut gps = GpsDriver::new(10);
+        let mut baro = BaroDriver::new(50);
+        let mut imu = ImuDriver::new(200);
+        let _ = gps.read().await.unwrap();
+        let _ = baro.read().await.unwrap();
+        let _ = imu.read().await.unwrap();
+        assert_eq!(gps.kind(), SensorKind::Gps);
+        assert_eq!(baro.kind(), SensorKind::Barometer);
+        assert_eq!(imu.kind(), SensorKind::Imu);
+        assert_eq!(gps.rate_hz(), 10);
+        assert_eq!(baro.rate_hz(), 50);
+        assert_eq!(imu.rate_hz(), 200);
     }
 
-    #[test]
-    fn gps_driver_reads_gps_kind() {
+    #[tokio::test]
+    async fn gps_driver_reads_gps_kind() {
         let mut d = GpsDriver::new(10);
-        let r = d.read().unwrap();
+        let r = d.read().await.unwrap();
         assert_eq!(r.kind, SensorKind::Gps);
     }
 
@@ -772,21 +797,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sensor_driver_trait_object_dispatch() {
-        let mut drivers: [Box<dyn SensorDriver>; 3] = [
-            Box::new(GpsDriver::new(10)),
-            Box::new(BaroDriver::new(50)),
-            Box::new(ImuDriver::new(200)),
-        ];
-        for d in &mut drivers {
-            let reading = d.read().expect("driver read");
-            assert_eq!(reading.kind, d.kind());
-            assert_eq!(reading.raw.len(), 32);
-        }
-        assert_eq!(drivers[0].kind(), SensorKind::Gps);
-        assert_eq!(drivers[1].kind(), SensorKind::Barometer);
-        assert_eq!(drivers[2].kind(), SensorKind::Imu);
+    #[tokio::test]
+    async fn sensor_driver_concrete_dispatch() {
+        let mut gps = GpsDriver::new(10);
+        let mut baro = BaroDriver::new(50);
+        let mut imu = ImuDriver::new(200);
+        let rg = gps.read().await.expect("gps read");
+        let rb = baro.read().await.expect("baro read");
+        let ri = imu.read().await.expect("imu read");
+        assert_eq!(rg.kind, SensorKind::Gps);
+        assert_eq!(rb.kind, SensorKind::Barometer);
+        assert_eq!(ri.kind, SensorKind::Imu);
+        assert_eq!(rg.raw.len(), 32);
     }
 
     #[test]

@@ -1428,3 +1428,45 @@ before writing by splitting model creation from model execution:
   dep) to `crates/themql-sse/Cargo.toml`; updated tokio features to
   `["rt","sync","net"]`.
 - `specs/sse.toml`: added `http_library = "axum"` to `[implementation]`.
+
+## Phase 6 (2026-08-20): Per-request authz + dep audit + sensor drivers + embedded MQTT
+
+### Commit 1: Per-request GraphQL role extraction
+- `AuthRole` now implements `FromStr` (case-insensitive admin/operator/observer)
+- Custom axum GraphQL handler in `themql-desktop` extracts the caller's
+  `better-auth` session role and injects it per-request via
+  `BatchRequest::data()` / `GraphQLWebSocket::with_data()`
+- When auth is off, schema built with `GraphqlSchemaImpl::new()` (no
+  global role) — guarded fields reject all requests per spec
+- `GraphqlSchemaImpl::with_role` marked as test-only in doc
+- 8 new tests (349 total)
+
+### Commit 2: Dependabot remediation + lru dedup
+- `lru` bumped 0.12.5 → 0.18.2 in `themql-cache` (dedup + fixes
+  RUSTSEC-2026-0002 IterMut + RUSTSEC-2026-0253 pop panic-safety)
+- 6 advisories added to `deny.toml [advisories].ignore` with precise
+  non-exploitability reasons (4× rustls-webpki CRL/X.509, 1×
+  jsonwebtoken type confusion, 1× lru IterMut)
+- `SECURITY.md` updated with full Dependabot Alert Dismissal Rationale table
+- GitHub UI dismissal is a manual follow-up
+
+### Commit 3: Real sensor drivers
+- BME280 (I2C barometer): full register protocol, calibration read,
+  datasheet §4.6 compensation math for temp/pressure/humidity
+- LSM6DS3 (I2C IMU): WHO_AM_I, CTRL config, 12-byte burst read,
+  scale conversion
+- NEO-6M (UART GPS): NMEA 0183 parser with XOR checksum validation
+- `SensorDriver` trait changed to `async fn read` per spec
+- New deps: `embedded-hal 1.0`, `embedded-hal-async 1.0`,
+  `embedded-io-async 0.7`
+- New module: `crates/themql-embedded/src/sensors/`
+- 12 new tests (361 total)
+
+### Commit 4: Embedded MQTT publish
+- `minimq 0.13` (MQTT v5, no_std, async) added as workspace dep
+- `specs/mqtt.toml` + `specs/embedded.toml` amended to name minimq
+  as the embedded MQTT implementation
+- New `crates/themql-embedded/src/mqtt.rs`: hand-formatted JSON
+  payload generation for telemetry (no serde_json — minimal deps)
+- Telemetry task updated to format payloads each cycle
+- 4 new tests (365 total)

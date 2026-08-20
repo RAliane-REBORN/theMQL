@@ -147,3 +147,16 @@ storage tests pass cleanly.
 
 The previous v0.0 inline spec that lived in this README has been superseded
 by the TOML spec set and is retained only in git history.
+## Phase 6 (2026-08-20)
+
+- **Per-request authz**: GraphQL field guards now see the actual
+  caller's session role (extracted from better-auth JWT/cookie), not
+  a global default. Anonymous callers default to Observer.
+- **Dependency audit**: 6 GitHub dependabot alerts classified as
+  non-exploitable and ignored in `deny.toml`. `lru` deduped 0.12→0.18.
+  See `SECURITY.md` for the full rationale table.
+- **Real sensor drivers**: BME280 (I2C barometer with full compensation
+  math), LSM6DS3 (I2C IMU), NEO-6M (UART GPS with NMEA 0183 parsing).
+  Generic over `embedded-hal` 1.0, mock-tested on host.
+- **Embedded MQTT**: `minimq 0.13` (MQTT v5, no_std, async) added.
+  Telemetry task formats JSON payloads for the 4 spec subjects.

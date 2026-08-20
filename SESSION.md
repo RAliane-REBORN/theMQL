@@ -95,3 +95,24 @@ Workspace `cargo check` green. No issues.
 
 ### Open questions / blockers
 None.
+
+## Phase 6 (2026-08-20): Per-request authz + dep audit + sensors + MQTT
+
+4 commits on branch `feat/phase-6-authz-sensors-mqtt`, single PR #8.
+
+1. **Per-request GraphQL role extraction**: Custom axum handler in
+   `themql-desktop` extracts `better-auth` session → `AuthRole` →
+   injects per-request via `BatchRequest::data()`. When auth off,
+   guards reject all requests (no global role). `AuthRole: FromStr`.
+2. **Dependabot remediation**: All 6 GitHub alerts are non-exploitable
+   (rustls-webpki CRL/X.509 paths not activated, jsonwebtoken type
+   confusion on JWT path not used, lru IterMut Stacked-Borrows only).
+   `lru` 0.12→0.18 dedup. 6 advisories ignored in `deny.toml`.
+3. **Real sensor drivers**: BME280 (I2C, full compensation math),
+   LSM6DS3 (I2C IMU), NEO-6M (UART NMEA parser). Generic over
+   `embedded-hal` 1.0. `SensorDriver` trait now `async fn read`.
+4. **Embedded MQTT**: `minimq 0.13` added. Spec amended. Telemetry
+   task formats JSON payloads via hand-formatted `write_f64`/`write_u32`.
+
+365 tests pass. Full validation green: fmt, check, test, clippy, deny,
+TOML sanity, metadata, cross-compile (thumbv7em-none-eabihf).

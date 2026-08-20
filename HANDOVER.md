@@ -930,3 +930,23 @@ None. Awaiting user direction.
   `cargo fmt -p themql-sse --check`, `cargo check --workspace`, TOML
   sanity — all pass.
 - Next: remaining Phase 3 stages (other transport adapters / crates).
+
+## Phase 6 handover (2026-08-20)
+
+### Completed
+- Per-request GraphQL role extraction via better-auth sessions
+- Dependabot remediation: 6 alerts classified non-exploitable, lru
+  deduped 0.12→0.18, deny.toml updated, SECURITY.md rationale table
+- Real sensor drivers: BME280, LSM6DS3, NEO-6M (generic over
+  embedded-hal 1.0, mock-tested on host)
+- Embedded MQTT: minimq 0.13 added, telemetry payload formatting,
+  spec amended
+
+### Next
+- Wire embassy-net TCP transport for actual minimq publish (requires
+  MCU HAL commit)
+- Per-request WS subscription role extraction (currently defaults to
+  Observer at upgrade time)
+- Manually dismiss 6 GitHub dependabot alerts using SECURITY.md text
+- Fuzzing harness + secret-management policy
+- tch-backend feature tests on beefier environment

@@ -46,6 +46,12 @@ embassy-sync = "0.8"
 embassy-executor = "0.10"
 embassy-time = "0.5"
 
+# Embedded sensor / MQTT deps
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+embedded-io-async = "0.7"
+minimq = "0.13"
+
 # Cache / storage
 cachelito = "0.16"
 moka = "0.12"
@@ -73,7 +79,7 @@ thiserror = "2"
 
 # Serialisation / KV
 bincode = "1"
-lru = "0.12"
+lru = "0.18"
 redis = { version = "0.27", features = ["tokio-comp"] }
 sled = "0.34"
 

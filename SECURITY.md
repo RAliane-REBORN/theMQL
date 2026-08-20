@@ -222,3 +222,29 @@ functions <= 60 lines, >= 2 assertions per public function as
 
 These limitations are tracked; they are not open invitations to land
 insecure defaults when the corresponding code is written.
+
+## Dependabot Alert Dismissal Rationale (2026-08-20)
+
+GitHub Dependabot reported 6 alerts on the default branch. All 6 are
+**not exploitable in our usage** and are ignored in `deny.toml
+[advisories].ignore`. The rationale for each:
+
+| Alert | Crate | Severity | Path in our tree | Not-exploitable because |
+|---|---|---|---|---|
+| RUSTSEC-2026-0104 | rustls-webpki 0.102/0.103 | High (DoS panic on malformed CRL BIT STRING) | rustls → reqwest/rumqttc → desktop | We never pass CRL data to webpki; reqwest/rumqttc use default trust store, no CRL revocation. Panic requires attacker-controlled CRL input. |
+| GHSA-h395-gr6q-cpjc | jsonwebtoken 9.3.1 | Moderate (type confusion in nbf/exp validation) | better-auth-core → desktop | better-auth's MemoryDatabaseAdapter session flow uses opaque `session_`-prefixed tokens (session.rs:223), not JWT issuance. `jsonwebtoken` is only referenced in an error enum (error.rs:71). We never call encode/decode on attacker-controlled JWTs. |
+| RUSTSEC-2026-0049 | rustls-webpki 0.103 | Moderate (CRL Distribution Point matching) | same as above | No CRL revocation enabled. |
+| RUSTSEC-2026-0002 | lru 0.12.5 | Low (Stacked Borrows violation in IterMut) | themql-cache direct dep | We do not use `IterMut` under Miri/Stacked Borrows. **Fixed by deduping lru to 0.18.2** (patched version); advisory kept in ignore list for audit traceability. |
+| RUSTSEC-2026-0099 | rustls-webpki 0.103 | Low (wildcard name constraints) | same as above | No name-constrained CA using wildcards in use. |
+| RUSTSEC-2026-0098 | rustls-webpki 0.103 | Low (URI name constraints) | same as above | No URI name-constrained CA in use. |
+
+**Action taken:** `lru` bumped from 0.12.5 → 0.18.2 in `themql-cache`
+(deduplicates the transitive 0.18.2 from ratatui, fixes
+RUSTSEC-2026-0002 and RUSTSEC-2026-0253). The remaining 5 alerts are
+transitive deps we cannot remove without upstream changes (better-auth
+pins `jsonwebtoken = "9"`; rustls-webpki is pulled by reqwest/rumqttc).
+All 6 are ignored in `deny.toml` with precise reasons.
+
+**GitHub UI dismissal:** Dependabot does not read `deny.toml`; the 6
+alerts must be manually dismissed in the GitHub Security tab using
+"Dismiss alert → Tolerable risk" with the rationale above.
