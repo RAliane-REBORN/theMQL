@@ -5594,6 +5594,8 @@ dependencies = [
 name = "themql-desktop"
 version = "0.1.0"
 dependencies = [
+ "async-graphql",
+ "async-graphql-axum",
  "axum",
  "better-auth",
  "clap",

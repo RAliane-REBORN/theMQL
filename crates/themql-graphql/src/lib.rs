@@ -292,6 +292,22 @@ impl AuthRole {
     }
 }
 
+impl std::str::FromStr for AuthRole {
+    type Err = ();
+
+    /// Parse a role from a string slice, case-insensitive. Returns
+    /// `Err(())` for unknown strings. Per `specs/auth.toml [authz]`, the
+    /// canonical role names are `admin`, `operator`, `observer`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "admin" => Ok(AuthRole::Admin),
+            "operator" => Ok(AuthRole::Operator),
+            "observer" => Ok(AuthRole::Observer),
+            _ => Err(()),
+        }
+    }
+}
+
 /// GraphQL field guard that requires a minimum [`AuthRole`]. The role
 /// is read from `async_graphql::Context::data::<AuthRole>()`.
 #[derive(Debug, Clone, Copy)]
@@ -515,6 +531,12 @@ impl GraphqlSchemaImpl {
 
     /// Build a schema with a default [`AuthRole`] injected as global
     /// data. All guarded fields will use this role for authorization.
+    ///
+    /// **Test-only.** Production code should use [`GraphqlSchemaImpl::new`]
+    /// and inject the role per-request via [`async_graphql::Request::data`]
+    /// or [`async_graphql::BatchRequest::data`], so the caller's actual
+    /// session role is enforced. This constructor is retained for tests
+    /// and the dev path where no auth is configured.
     #[must_use]
     pub fn with_role(
         query: QueryRoot,
@@ -877,6 +899,22 @@ mod tests {
         assert!(AuthRole::Observer.satisfies(AuthRole::Observer));
         assert!(!AuthRole::Observer.satisfies(AuthRole::Operator));
         assert!(!AuthRole::Observer.satisfies(AuthRole::Admin));
+    }
+
+    #[test]
+    fn auth_role_from_str_maps_known_roles_case_insensitive() {
+        use std::str::FromStr;
+        assert_eq!(AuthRole::from_str("admin"), Ok(AuthRole::Admin));
+        assert_eq!(AuthRole::from_str("Operator"), Ok(AuthRole::Operator));
+        assert_eq!(AuthRole::from_str("OBSERVER"), Ok(AuthRole::Observer));
+    }
+
+    #[test]
+    fn auth_role_from_str_unknown_returns_err() {
+        use std::str::FromStr;
+        assert!(AuthRole::from_str("root").is_err());
+        assert!(AuthRole::from_str("").is_err());
+        assert!(AuthRole::from_str("superuser").is_err());
     }
 
     #[tokio::test]

@@ -16,13 +16,16 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use better_auth::UserOps;
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::event::{self, Event, KeyCode};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use themql_graphql::AuthRole;
 
 /// Desktop CLI. Mirrors `specs/desktop.toml [api.Cli]`.
 #[derive(Debug, Clone, Parser)]
@@ -257,14 +260,17 @@ impl themql_core::MessageHandler for MqttToSseBridge {
 /// set, an MQTT-to-SSE bridge forwards incoming MQTT messages on
 /// `vehicle.events` to the SSE publisher. When `--enable-auth` is set,
 /// `better-auth` session auth routes are mounted at `/api/auth/*` and
-/// GraphQL field guards are activated with a default `Admin` role.
+/// GraphQL field guards are activated with the **per-request role**
+/// extracted from the caller's session (admin > operator > observer,
+/// defaulting to observer for anonymous/unknown). When auth is off,
+/// the schema is built without any global role so guarded fields
+/// reject all requests (per spec: auth is required for guarded data).
 /// MQTT ACLs are applied based on the `--mqtt-username` role mapping.
 #[allow(clippy::too_many_lines)]
 async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
     use better_auth::handlers::axum::AxumIntegration;
-    use std::sync::Arc;
     use themql_graphql::{
-        AuthRole, DispatchBridgeImpl, GraphqlResolverBridgeImpl, GraphqlSchema, GraphqlSchemaImpl,
+        DispatchBridgeImpl, GraphqlResolverBridgeImpl, GraphqlSchema, GraphqlSchemaImpl,
         MutationRoot, QueryRoot, SubscriptionRoot,
     };
     use themql_sse::TokioSsePublisher;
@@ -278,20 +284,14 @@ async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
     let source: Arc<dyn themql_graphql::GraphqlSubscriptionSource> =
         Arc::clone(&publisher) as Arc<dyn themql_graphql::GraphqlSubscriptionSource>;
 
-    let schema = GraphqlSchemaImpl::with_role(
-        QueryRoot::new(bridge),
-        MutationRoot::new(dispatch),
-        SubscriptionRoot::with_source(source),
-        AuthRole::Admin,
-    );
-
     let sse_subject = themql_core::Subject::from_str("vehicle.events")
         .map_err(|e| themql_core::Error::validation_error(e.to_string()))?;
     let sse_router = themql_sse::serve_sse_with_publisher(Arc::clone(&publisher), sse_subject);
-    let graphql_router = themql_graphql::serve_graphql(schema.schema().clone());
-    let mut app = graphql_router.merge(sse_router);
 
-    if args.enable_auth {
+    let (graphql_router, auth_state): (
+        axum::Router,
+        Option<Arc<better_auth::BetterAuth<better_auth::MemoryDatabaseAdapter>>>,
+    ) = if args.enable_auth {
         let secret = if let Some(s) = &args.auth_secret {
             s.clone()
         } else if let Ok(s) = std::env::var("THEMQL_AUTH_SECRET") {
@@ -317,10 +317,30 @@ async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
             .map_err(|e| themql_core::Error::internal_error(format!("auth init: {e}")))?;
 
         let auth_arc = Arc::new(auth);
+        let schema = GraphqlSchemaImpl::new(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::with_source(source),
+        );
+        let graphql_router = authed_graphql_router(schema.schema().clone(), Arc::clone(&auth_arc));
+        (graphql_router, Some(auth_arc))
+    } else {
+        let schema = GraphqlSchemaImpl::new(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::with_source(source),
+        );
+        let graphql_router = themql_graphql::serve_graphql(schema.schema().clone());
+        eprintln!("themql-desktop: auth disabled — guarded GraphQL fields will reject requests");
+        (graphql_router, None)
+    };
+
+    let mut app = graphql_router.merge(sse_router);
+
+    if let Some(auth_arc) = auth_state {
         let auth_router = Arc::clone(&auth_arc).axum_router().with_state(auth_arc);
         app = app.merge(auth_router);
-
-        println!("themql-desktop: auth enabled (better-auth, email/password)");
+        println!("themql-desktop: auth enabled (better-auth, email/password, per-request role)");
     }
 
     let addr: std::net::SocketAddr = format!("{}:{}", args.bind, args.port)
@@ -387,6 +407,135 @@ async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
         .await
         .map_err(|e| themql_core::Error::internal_error(format!("server error: {e}")))?;
     Ok(())
+}
+
+/// Build an axum router for GraphQL where every request is authenticated
+/// via `better-auth`. The caller's session role is extracted and injected
+/// per-request into the GraphQL execution data, so [`RoleGuard`] sees the
+/// actual role rather than a global default. Anonymous callers default to
+/// `Observer` (read-only on `vehicle.*`).
+fn authed_graphql_router(
+    schema: async_graphql::Schema<
+        themql_graphql::QueryRoot,
+        themql_graphql::MutationRoot,
+        themql_graphql::SubscriptionRoot,
+    >,
+    auth: Arc<better_auth::BetterAuth<better_auth::MemoryDatabaseAdapter>>,
+) -> axum::Router {
+    let state = AuthedGraphqlState { schema, auth };
+    axum::Router::new()
+        .route("/graphql", axum::routing::post(authed_graphql_post))
+        .route("/graphql", axum::routing::get(authed_graphql_ws_upgrade))
+        .with_state(state)
+}
+
+/// State shared across authed GraphQL POST and WS handlers.
+#[derive(Clone)]
+struct AuthedGraphqlState {
+    schema: async_graphql::Schema<
+        themql_graphql::QueryRoot,
+        themql_graphql::MutationRoot,
+        themql_graphql::SubscriptionRoot,
+    >,
+    auth: Arc<better_auth::BetterAuth<better_auth::MemoryDatabaseAdapter>>,
+}
+
+/// Authed GraphQL POST handler: extract the session role from the
+/// request and inject it into the GraphQL execution data before
+/// running the query/mutation.
+async fn authed_graphql_post(
+    axum::extract::State(state): axum::extract::State<AuthedGraphqlState>,
+    headers: axum::http::HeaderMap,
+    req: async_graphql_axum::GraphQLBatchRequest,
+) -> async_graphql_axum::GraphQLResponse {
+    let role = resolve_role_from_headers(&state.auth, &headers).await;
+    let batch = req.0.data(role);
+    async_graphql_axum::GraphQLResponse(state.schema.execute_batch(batch).await)
+}
+
+/// Authed GraphQL WebSocket upgrade handler: extract the session role
+/// from the upgrade request headers (cookie/Authorization), inject it
+/// into the `GraphQLWebSocket` data, and serve the subscription stream.
+async fn authed_graphql_ws_upgrade(
+    axum::extract::State(state): axum::extract::State<AuthedGraphqlState>,
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::WebSocketUpgrade,
+    protocol: async_graphql_axum::GraphQLProtocol,
+) -> axum::response::Response {
+    use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
+    let role = resolve_role_from_headers(&state.auth, &headers).await;
+    let mut data = async_graphql::Data::default();
+    data.insert(role);
+    let schema = state.schema.clone();
+    ws.protocols(ALL_WEBSOCKET_PROTOCOLS)
+        .on_upgrade(move |socket| {
+            async_graphql_axum::GraphQLWebSocket::new(socket, schema, protocol)
+                .with_data(data)
+                .serve()
+        })
+}
+
+/// Resolve the caller's [`AuthRole`] from `better-auth` session headers.
+/// Reads the session token from the `Authorization: Bearer <token>`
+/// header or the configured session cookie (per `better-auth`
+/// `SessionManager::extract_session_token`), looks up the user, and
+/// maps `user.role()` → [`AuthRole`]. Anonymous/unknown/missing roles
+/// default to `Observer` per `specs/auth.toml [authz.graphql]`.
+async fn resolve_role_from_headers(
+    auth: &Arc<better_auth::BetterAuth<better_auth::MemoryDatabaseAdapter>>,
+    headers: &axum::http::HeaderMap,
+) -> AuthRole {
+    let cookie_name = auth.config().session.cookie_name.as_str();
+    let token = extract_session_token(headers, cookie_name);
+    let Some(token) = token else {
+        return AuthRole::Observer;
+    };
+
+    let Ok(Some(session)) = auth.session_manager().get_session(&token).await else {
+        return AuthRole::Observer;
+    };
+
+    let Ok(Some(user)) = auth.database().get_user_by_id(&session.user_id).await else {
+        return AuthRole::Observer;
+    };
+
+    user.role
+        .as_deref()
+        .and_then(|r| r.parse::<AuthRole>().ok())
+        .unwrap_or(AuthRole::Observer)
+}
+
+/// Extract a `better-auth` session token from request headers. Checks
+/// `Authorization: Bearer <token>` first, then the configured cookie.
+/// Mirrors `better_auth_core::session::SessionManager::extract_session_token`
+/// but operates on `axum::http::HeaderMap` directly (the upstream
+/// extractor takes `AuthRequest`, which is not available here).
+fn extract_session_token(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option<String> {
+    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                if !token.is_empty() {
+                    return Some(token.to_owned());
+                }
+            }
+        }
+    }
+
+    if let Some(cookie_header) = headers.get(axum::http::header::COOKIE) {
+        if let Ok(cookie_str) = cookie_header.to_str() {
+            for part in cookie_str.split(';') {
+                let part = part.trim();
+                let prefix = format!("{cookie_name}=");
+                if let Some(value) = part.strip_prefix(&prefix) {
+                    if !value.is_empty() {
+                        return Some(value.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Wait for Ctrl-C to shut down the server.
@@ -903,10 +1052,95 @@ mod tests {
 
     #[test]
     fn graphql_auth_role_hierarchy() {
-        use themql_graphql::AuthRole;
         assert!(AuthRole::Admin.satisfies(AuthRole::Operator));
         assert!(AuthRole::Admin.satisfies(AuthRole::Observer));
         assert!(AuthRole::Operator.satisfies(AuthRole::Observer));
         assert!(!AuthRole::Observer.satisfies(AuthRole::Operator));
+    }
+
+    #[test]
+    fn extract_session_token_reads_bearer_header() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer session_abc123"),
+        );
+        let token = extract_session_token(&headers, "session");
+        assert_eq!(token.as_deref(), Some("session_abc123"));
+    }
+
+    #[test]
+    fn extract_session_token_reads_cookie() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_static("other=val; session=session_xyz789; foo=bar"),
+        );
+        let token = extract_session_token(&headers, "session");
+        assert_eq!(token.as_deref(), Some("session_xyz789"));
+    }
+
+    #[test]
+    fn extract_session_token_returns_none_when_absent() {
+        let headers = axum::http::HeaderMap::new();
+        let token = extract_session_token(&headers, "session");
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn auth_role_from_str_maps_known_roles() {
+        use std::str::FromStr;
+        assert_eq!(AuthRole::from_str("admin"), Ok(AuthRole::Admin));
+        assert_eq!(AuthRole::from_str("operator"), Ok(AuthRole::Operator));
+        assert_eq!(AuthRole::from_str("observer"), Ok(AuthRole::Observer));
+        assert!(AuthRole::from_str("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn authed_graphql_router_constructs() {
+        use themql_graphql::{
+            DispatchBridgeImpl, GraphqlResolverBridgeImpl, GraphqlSchema, GraphqlSchemaImpl,
+            MutationRoot, QueryRoot, SubscriptionRoot,
+        };
+
+        let resolver: Arc<dyn themql_core::Resolver> = Arc::new(DesktopResolver);
+        let bridge = Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+        let handler: Arc<dyn themql_core::MessageHandler> = Arc::new(DesktopHandler);
+        let dispatch = Arc::new(DispatchBridgeImpl::new(handler));
+
+        let schema = GraphqlSchemaImpl::new(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::default(),
+        );
+
+        let auth_config =
+            better_auth::AuthConfig::new("test-secret-key-that-is-at-least-32-chars!!");
+        let auth = better_auth::AuthBuilder::new(auth_config)
+            .database(better_auth::MemoryDatabaseAdapter::new())
+            .plugin(better_auth::plugins::EmailPasswordPlugin::new())
+            .build()
+            .await
+            .expect("auth build");
+        let auth_arc = Arc::new(auth);
+
+        let router = authed_graphql_router(schema.schema().clone(), auth_arc);
+        let _ = router;
+    }
+
+    #[tokio::test]
+    async fn resolve_role_defaults_to_observer_without_session() {
+        let auth_config =
+            better_auth::AuthConfig::new("test-secret-key-that-is-at-least-32-chars!!");
+        let auth = better_auth::AuthBuilder::new(auth_config)
+            .database(better_auth::MemoryDatabaseAdapter::new())
+            .plugin(better_auth::plugins::EmailPasswordPlugin::new())
+            .build()
+            .await
+            .expect("auth build");
+        let auth_arc = Arc::new(auth);
+        let headers = axum::http::HeaderMap::new();
+        let role = resolve_role_from_headers(&auth_arc, &headers).await;
+        assert_eq!(role, AuthRole::Observer);
     }
 }
