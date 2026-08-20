@@ -7,3 +7,14 @@ license.workspace = true
 [[bin]]
 name = "themql-embedded"
 path = "src/main.rs"
+
+[target.'cfg(target_os = "none")'.dependencies]
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread"] }
+embassy-sync.workspace = true
+embassy-time.workspace = true
+cortex-m-rt.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["cortex-m-rt"]
+
+[target.'cfg(not(target_os = "none"))'.dependencies]
