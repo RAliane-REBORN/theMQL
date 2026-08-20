@@ -69,13 +69,13 @@ ignore = [
     "RUSTSEC-2025-0141",  # unmaintained: atty (transitive via sled/redis)
     "RUSTSEC-2025-0057",  # unmaintained: paste (transitive)
     "RUSTSEC-2024-0384",  # unmaintained: proc-macro-error (transitive)
-    "RUSTSEC-2026-0002",  # unsound: transitive dep
-    "RUSTSEC-2026-0253",  # unsound: transitive dep
+    "RUSTSEC-2026-0002",  # unsound: lru IterMut (was 0.12.5; now deduped to 0.18.2 which is patched)
     "RUSTSEC-2025-0134",  # unmaintained: transitive dep
-    "RUSTSEC-2026-0049",  # advisory in transitive dep
-    "RUSTSEC-2026-0098",  # advisory in transitive dep
-    "RUSTSEC-2026-0099",  # advisory in transitive dep
-    "RUSTSEC-2026-0104",  # advisory in transitive dep
+    "RUSTSEC-2026-0049",  # rustls-webpki CRL Distribution Point matching; not reachable: no CRL revocation enabled
+    "RUSTSEC-2026-0098",  # rustls-webpki URI name constraints; not reachable: no URI name-constrained CA
+    "RUSTSEC-2026-0099",  # rustls-webpki wildcard name constraints; not reachable: no wildcard name-constrained CA
+    "RUSTSEC-2026-0104",  # rustls-webpki CRL BIT STRING panic; not reachable: no CRL data passed to webpki
     "RUSTSEC-2026-0110",  # unmaintained: bare-metal (transitive via cortex-m/embassy)
     "RUSTSEC-2026-0173",  # unmaintained: proc-macro-error2 (transitive via better-auth)
+    "GHSA-h395-gr6q-cpjc",  # jsonwebtoken type confusion in nbf/exp validation; not reachable: better-auth MemoryDatabaseAdapter uses opaque session_ tokens, not JWT issuance (session.rs:223)
 ]
