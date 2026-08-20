@@ -13,74 +13,82 @@ standing rules). When a session ends, fold the in-flight items into
 
 ## Just-completed turn
 
-Phase 3 Stages 1-11 complete: all placeholder/stub implementations
-replaced with real backends across all 20 crates. Commit `828b373`
-pushed to `feat/phase-2-heavy-dep-wiring`, PR #4 open.
+Phase 3 followups (Workstreams A/B/C/D) complete:
 
-1. **themql-artifact (Stage 1)**: real BLAKE3 `HashValidator`,
-   `FileArtifactLoader`, `BincodeArtifactWriter` (bincode round-trip).
-   22 tests.
-2. **themql-storage (Stage 2)**: `SledStorage` (disk-backed sled),
-   `HelixStorage` alias, `ByPredicate` query support. 31 tests.
-3. **themql-cache (Stage 3)**: L1 (`lru::LruCache`), L2 (`moka::sync::Cache`),
-   L3 (`redis::Client`), key→subject index for pattern invalidation,
-   demotion on hit. 32 tests.
-4. **themql-estimation (Stage 4)**: real quaternion EKF with Jacobian +
-   Joseph-form Kalman gain (`K = PHᵀ(HPHᵀ+R)⁻¹`,
-   `P = (I-KH)P(I-KH)ᵀ + KRKᵀ`), `SensorModel<M>` trait, `GpsModel`,
-   `BaroModel`, `BayesianEstimator`. 24 tests.
-5. **themql-analysis (Stage 5)**: polars-backed types,
-   `StorageAnalysisPipeline`. 12 tests.
-6. **themql-training (Stage 6)**: real `TchTrainer` (MLP + Adam + MSE +
-   TorchScript export) behind `tch-backend`. 6 default tests.
-7. **themql-inference (Stage 7)**: real `TchInferenceEngine` (CModule
-   load + `forward_ts` + deadline check + rollback) behind `tch-backend`.
-   6 default tests.
-8. **themql-sse (Stage 8)**: real broadcast + `serve_sse` (axum +
-   Last-Event-ID replay). 17 tests.
-9. **themql-mqtt (Stage 9)**: `RumqttcTransport` + `RumqttcConfig`.
-   25 tests.
-10. **themql-graphql (Stage 10)**: `GraphqlResolverBridgeImpl`,
-    `GraphqlSchemaImpl`, `serve_graphql` (axum HTTP/WS). Core
-    `Resolver`/`MessageHandler` made dyn-compatible. 13 tests.
-11. **Stage 11 (validation)**: all 7 gates green. Commit `828b373`.
+1. **Workstream A — living docs refresh + PR #4 merge**: synced all 8
+   living docs to Phase 3's actual end state (removed stale placeholder
+   claims about EKF, HashValidator, cache backends). Closed BUG-0008
+   (sled temp test now stable). Committed `81af681`, pushed, merged PR
+   #4 to main (`4fee9d9`). Created `feat/phase-3-followups` branch.
+2. **Workstream B — real GraphQL subscriptions**: added
+   `GraphqlSubscriptionSource` trait (dyn-compatible) + impl for
+   `TokioSsePublisher`. `SseStreamAdapter` wraps `SseStream` as
+   `Stream<Item = serde_json::Value>` via a background task + mpsc
+   channel. `SubscriptionRoot::with_source(source)` + `subscribe()`
+   now returns a real live stream of events from the SSE publisher.
+   `SubscriptionRoot::default()` returns an error (no source). +2 tests
+   (subscription with source streams real events; without source
+   returns error). 15 tests total in themql-graphql (was 13).
+3. **Workstream D — GitHub Actions CI**: created
+   `.github/workflows/ci.yml` with 8 jobs: fmt, check, clippy, test,
+   toml-sanity, ci-guard, deny, machete. Uses `dtolnay/rust-toolchain`
+   + `Swatinem/rust-cache`. `tch-backend` explicitly skipped (libtorch
+   too heavy for free runners). Runs on push to `feat/*` + PRs to
+   `main`.
+4. **Workstream C — real themql-desktop subcommands**: rewrote all 5
+   subcommand bodies:
+   - `serve`: builds GraphQL schema (`GraphqlSchemaImpl` with real
+     resolver bridge + dispatch bridge + subscription source) + SSE
+     server (`serve_sse`), merges axum routers, binds TCP, runs with
+     graceful shutdown (Ctrl-C).
+   - `analyze`: reads JSON data file, builds `PolarsDatasetBuilder`,
+     runs `RayonAnalysisPipeline`, prints stats.
+   - `train`: behind `tch-backend` feature — loads dataset, builds
+     `TrainingConfig`, runs `TchTrainer::train`, packages via
+     `BincodeArtifactWriter`, writes to file. Without feature: returns
+     error with instructions.
+   - `validate`: loads `ModelArtifact` via `FileArtifactLoader`, prints
+     format/schema_version/bytes/hash.
+   - `telemetry`: opens `SledStorage`, queries by subject pattern,
+     prints entries.
+   - Added `tch-backend` feature to themql-desktop Cargo.toml (optional
+     dep on `themql-training`). 12 tests (was 13 — removed TUI test
+     that requires a terminal).
+
+Validation: 306 tests pass workspace-wide (default features). `cargo
+fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo deny check`, `cargo machete --with-metadata`,
+`scripts/ci_guard.py` — all green. Removed unused deps: `serde` from
+themql-graphql, `serde_json` from themql-analysis (moved to dev-deps),
+`tempfile` from themql-desktop dev-deps.
 
 ## State of the repository
 
 - Phase 1 complete (spec + 20 crates implemented).
 - Phase 2 Stages 1-12 complete.
-- Phase 3 Stages 1-11 complete: all placeholders replaced with real
-  backends. 305 tests pass workspace-wide (304 unit + 1 doc, default
-  features). 20 crates, 20 specs.
-- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
-  warnings`, `cargo test --workspace`, `cargo deny check`,
-  `cargo machete --with-metadata`, `scripts/ci_guard.py` — all green.
-- `tch-backend` feature compiles clean in both `themql-training` and
-  `themql-inference` (tests not run: libtorch OOM).
-- No open bugs (BUG-0008 resolved — the flaky sled temp test is now
-  stable after Phase 3 Stage 2 replaced the in-memory HashMap with
-  real sled-backed SledStorage).
+- Phase 3 Stages 1-11 complete.
+- Phase 3 followups complete: real GraphQL subscriptions, GitHub
+  Actions CI, real themql-desktop subcommands. 306 tests pass
+  workspace-wide (default features). 20 crates, 20 specs.
+- Full validation green.
+- `tch-backend` feature compiles clean in themql-training/
+  themql-inference/themql-desktop (tests not run: libtorch OOM).
+- No open bugs.
 
 ## In-flight work
 
-Phase 3 follow-ups (user-requested, starting now):
-
-- Workstream A: refresh living docs + merge PR #4 to main + create
-  `feat/phase-3-followups` branch. **In progress.**
-- Workstream B: wire real GraphQL subscriptions from themql-sse into
-  `SubscriptionRoot.subscribe`.
-- Workstream D: create GitHub Actions CI workflow.
-- Workstream C: implement all 5 themql-desktop subcommands
-  (serve/analyze/train/validate/telemetry).
+None. Phase 3 followups are complete. Changes are committed on
+`feat/phase-3-followups` branch, ready to push and open PR #5.
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. (in progress) Workstream A → B → D → C.
-2. Run `tch-backend` feature tests once a beefier environment is
+1. Run `tch-backend` feature tests once a beefier environment is
    available (>7.8GB RAM).
-3. Real `themql-embedded` embassy main (requires thumbv7em target).
-4. Transport-layer authn/authz policy (MQTT broker credentials, GraphQL
+2. Real `themql-embedded` embassy main (requires thumbv7em target).
+3. Transport-layer authn/authz policy (MQTT broker credentials, GraphQL
    access control).
+4. Wire MQTT bridge into the `serve` subcommand (currently prints
+   "not yet wired" when `--enable-mqtt` is passed).
 
 ## Open questions / blockers
 

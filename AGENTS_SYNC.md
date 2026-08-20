@@ -19,11 +19,14 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
-### 2026-08-20 — no subagents this turn (Phase 3 follow-ups)
+### 2026-08-20 — no subagents this turn (Phase 3 followups complete)
 
-Phase 3 follow-ups (Workstreams A/B/C/D) executed by the lead opencode
-agent directly; no subagents were spawned. Workstream A (living-docs
-refresh + PR #4 merge + new branch) in progress.
+Phase 3 followups (Workstreams A/B/C/D) executed by the lead opencode
+agent directly; no subagents were spawned. All 4 workstreams complete:
+living docs refreshed + PR #4 merged to main, real GraphQL subscriptions
+wired from themql-sse, GitHub Actions CI workflow created, all 5
+themql-desktop subcommands implemented with real crate APIs. 306 tests
+pass workspace-wide.
 
 ### 2026-08-20 — no subagents this turn (earlier)
 

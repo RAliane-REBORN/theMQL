@@ -4967,9 +4967,18 @@ dependencies = [
 name = "themql-desktop"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "ratatui",
+ "serde_json",
+ "themql-analysis",
+ "themql-artifact",
  "themql-core",
+ "themql-graphql",
+ "themql-schema",
+ "themql-sse",
+ "themql-storage",
+ "themql-training",
  "tokio",
 ]
 
@@ -5003,9 +5012,9 @@ dependencies = [
  "async-graphql-axum",
  "axum",
  "futures-util",
- "serde",
  "serde_json",
  "themql-core",
+ "themql-sse",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -5240,6 +5249,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2 0.6.5",
  "tokio-macros",
  "windows-sys 0.61.2",

@@ -5,6 +5,74 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 3 followups: real GraphQL subscriptions + CI + desktop subcommands
+
+Four workstreams completing the Phase 3 follow-ups:
+
+#### Workstream A — living docs refresh + PR #4 merge
+- Synced all 8 living docs to Phase 3's actual end state (removed stale
+  placeholder claims about EKF, HashValidator, cache backends).
+- Closed BUG-0008 (sled temp test now stable after Stage 2).
+- Committed `81af681`, pushed, merged PR #4 to main (`4fee9d9`).
+- Created `feat/phase-3-followups` branch off main.
+
+#### Workstream B — real GraphQL subscriptions
+- Added `GraphqlSubscriptionSource` trait (dyn-compatible) +
+  `JsonValueStream` type alias.
+- Implemented `GraphqlSubscriptionSource` for `TokioSsePublisher`:
+  `subscribe_stream` calls `SsePublisher::add_subscriber`, wraps the
+  `SseStream` in `SseStreamAdapter` (background task + mpsc channel
+  converts `SseEvent` → `serde_json::Value`).
+- `SubscriptionRoot::with_source(source)` configures a live event
+  source. `subscribe(subject)` now returns a real `Stream` of
+  `Json<Value>` events from the SSE publisher.
+- `SubscriptionRoot::default()` returns an error on subscribe (no
+  source configured).
+- +2 tests: `subscription_with_source_streams_real_events` (broadcast
+  → receive via GraphQL subscription), `subscription_without_source_
+  returns_error`.
+- themql-graphql: 13 → 15 tests. Added `themql-sse` + `tokio` (sync)
+  deps. Removed unused `serde` dep.
+
+#### Workstream D — GitHub Actions CI
+- Created `.github/workflows/ci.yml` with 8 jobs: `fmt`, `check`,
+  `clippy`, `test`, `toml-sanity`, `ci-guard`, `deny`, `machete`.
+- Uses `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`.
+- `tch-backend` feature explicitly skipped (libtorch too heavy for
+  free runners — documented in workflow comments).
+- Runs on push to `feat/*` branches + PRs to `main`.
+
+#### Workstream C — real themql-desktop subcommands
+- Rewrote all 5 subcommand bodies to compose real crate APIs:
+  - `serve`: builds `GraphqlSchemaImpl` (real resolver bridge + dispatch
+    bridge + subscription source from `TokioSsePublisher`) + `serve_sse`
+    axum router, merges routers, binds TCP, runs with graceful shutdown
+    (Ctrl-C via `tokio::signal`).
+  - `analyze`: reads JSON data file, builds `PolarsDatasetBuilder`, runs
+    `RayonAnalysisPipeline`, prints row/column/null stats.
+  - `train`: behind `tch-backend` feature — loads bincode dataset,
+    builds `TrainingConfig`, runs `TchTrainer::train`, packages via
+    `BincodeArtifactWriter::write` + `write_to_file`. Without feature:
+    returns error with rebuild instructions.
+  - `validate`: loads `ModelArtifact` via `FileArtifactLoader`, prints
+    format/schema_version/model_bytes/hash.
+  - `telemetry`: opens `SledStorage`, queries by `SubjectPattern`,
+    prints entries.
+- Added `tch-backend` feature to themql-desktop Cargo.toml (optional
+  dep on `themql-training`). Added deps: `themql-graphql`,
+  `themql-sse`, `themql-analysis`, `themql-artifact`, `themql-storage`,
+  `themql-schema`, `axum`, `serde_json`.
+- 12 tests (was 13 — removed TUI test that requires a terminal; added
+  error-path tests for train/validate/telemetry).
+- Removed unused deps: `serde_json` from themql-analysis main deps
+  (moved to dev-deps), `tempfile` from themql-desktop dev-deps.
+
+#### Validation
+- 306 tests pass workspace-wide (default features).
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo deny check`, `cargo machete --with-metadata`,
+  `scripts/ci_guard.py` — all green.
+
 ### 2026-08-20 — Phase 3 Stages 1-11 complete: all placeholders replaced with real backends
 
 Phase 3 replaced every remaining placeholder/stub implementation with

@@ -14,10 +14,10 @@ themql-schema.workspace = true
 themql-storage.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 polars.workspace = true
 rayon.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
