@@ -25,7 +25,30 @@ line + date + commit/PR reference when fixed.
 
 ## Open bugs
 
-(none)
+### BUG-0008: flaky `themql-storage::helix_alias_works` test (pre-existing)
+
+- Discovered: 2026-08-20 (during Phase 3 Stages 6/7 workspace test run;
+  pre-existing in the uncommitted working tree from prior Phase 2/3
+  stages, not caused by Stages 6/7)
+- Severity: minor (does not affect any Stage 6/7 crate; only fails
+  intermittently under workspace `cargo test`)
+- Subsystem: themql-storage
+- Status: open
+- Symptom: `tests::helix_alias_works` panics with
+  `sled temp open: ConnectionFailed` at
+  `crates/themql-storage/src/lib.rs:436`.
+- Expected: the test should open a temp sled database and pass.
+- Reproduction: `cargo test --workspace` (intermittent; the test does
+  not exist on the committed tree `fffda3c` — it was added in the
+  uncommitted working tree).
+- Root cause: likely a sled temp-file/connection race in a
+  resource-constrained environment (7.8GB RAM, no swap). The test is
+  not present in the last commit (`fffda3c`); it was introduced by
+  prior uncommitted Phase 2/3 work.
+- Fix: not yet attempted (out of scope for Stages 6/7).
+- Follow-up: investigate the `helix_alias_works` test added to
+  `themql-storage`; consider gating it behind a `tempfile` feature or
+  making the sled open retry-on-failure.
 
 ## Resolved bugs
 
@@ -103,6 +126,11 @@ pass workspace-wide (default features). Full validation green.
 - **`serde-big-array` dependency** — added to workspace.dependencies for
   serializing the 21x21 covariance `[f64; 441]` in themql-telemetry.
   Reassess if a more idiomatic serde path emerges.
+- **GraphQL subscription placeholder (Phase 3 Stage 10)** —
+  `SubscriptionRoot.subscribe(subject)` emits a single placeholder value
+  then completes. Real `themql-message` stream wiring (via the SSE/MQTT
+  bridge) is a follow-up. The `SubscriptionRoot` struct holds an
+  `Option<Arc<dyn GraphqlResolverBridge>>` reserved for that wiring.
 
 ### Stub backends (not bugs)
 

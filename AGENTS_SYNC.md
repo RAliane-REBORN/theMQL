@@ -21,6 +21,13 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ### 2026-08-20 — no subagents this turn
 
+Phase 3 Stages 6 & 7 (real training loop in themql-training + real
+model loading/forward pass in themql-inference, both behind the
+`tch-backend` feature) were executed by the lead opencode agent
+directly; no subagents were spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
 Phase 2 Stage 12 (final validation + commit + PR) was executed by the
 lead opencode agent directly; no subagents were spawned.
 
@@ -188,3 +195,8 @@ executed by the lead opencode agent directly; no subagents were spawned.
   `CHANGELOG.md`, `SESSION.md`, `AGENTS_SYNC.md`.
 - Conflicts / overlaps: none.
 - Follow-up: none (superseded by the Phase 1 complete turn above).
+
+## 2026-08-20
+
+- No subagents this turn. themql-sse Stage 8 implemented directly
+  (real broadcast channel + axum serve_sse + Last-Event-ID replay).

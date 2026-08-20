@@ -75,7 +75,13 @@ Treat embedded-domain findings as safety issues, not just security issues.
   (`SPEC.toml [architecture.forbidden]`).
 - **Unvalidated model artifact import** — a malicious or corrupt artifact
   could execute arbitrary tensor operations. The
-  `specs/model_artifact.toml` validation gate is the control.
+  `specs/model_artifact.toml` validation gate is the control. As of
+  Phase 3 Stage 7, `themql-inference::TchInferenceEngine::load()`
+  (behind `tch-backend`) runs `themql_artifact::HashValidator::new()
+  .validate(&artifact)` and rejects on any `report.errors`, rejects
+  empty bytes on every load (not just the first), and only then
+  deserialises the bytes into a `tch::CModule`. The placeholder
+  behaviour that skipped validation after the first load is gone.
 - **HelixDB / Valkey access** — L4 (helix-db) is authoritative; L3 (valkey)
   is distributed ephemeral. Treat credential handling and access boundaries
   as security-relevant from Phase 1 onward.
@@ -140,7 +146,7 @@ Before a change touches anything in `themql-transport`, `themql-graphql`,
 - Does it introduce unbounded channels or blocking work on the async
   executor? (must not)
 
-## Known limitations (as of v0.1, 2026-08-20, Phase 2 Stages 1-12 complete)
+## Known limitations (as of v0.1, 2026-08-20, Phase 3 Stage 10 complete)
 
 All 20 crates now have real `src/` content (traits + types + error types +
 unit tests). The four safety-critical crates (themql-gnc, themql-estimation,
@@ -150,12 +156,12 @@ no recursion, fixed loop bounds, no heap alloc after init where required,
 functions <= 60 lines, >= 2 assertions per public function as
 `if !invariant { return Err }`, no unwrap()/expect() in non-test code.
 
-- **Placeholder hash in themql-artifact (MUST FIX BEFORE DEPLOYMENT)** —
-  `HashValidator` uses a deterministic fold hash, NOT real SHA-256 or BLAKE3.
-  It is NOT cryptographically secure. A malicious or corrupt model artifact
-  could pass the integrity check. This is an acknowledged v0.1 placeholder
-  to avoid pulling a crypto crate into a safety-critical crate; it must be
-  replaced with a real cryptographic hash before any deployment.
+- **BLAKE3 hash in themql-artifact (real, as of Phase 2)** —
+  `HashValidator` now uses `blake3::hash` for the 32-byte integrity
+  digest (the v0.1 placeholder fold hash was replaced in Phase 2).
+  Model artifacts are hash-verified before activation.
+  `TchInferenceEngine::load()` (Phase 3 Stage 7) runs the full
+  `HashValidator` validation pipeline and rejects on any errors.
 - **Simplified EKF in themql-estimation** — the v0.1 `Ekf` uses
   identity-gain updates, NOT full nonlinear quaternion dynamics +
   Jacobian-based Kalman gain. State estimation correctness is NOT
@@ -194,8 +200,15 @@ functions <= 60 lines, >= 2 assertions per public function as
   credential handling, and input validation must be enforced.
 - `tch` is wired behind a `tch-backend` feature gate in
   themql-training/themql-inference. The feature compiles clean but tests
-  are not run in this environment (libtorch + RAM). No live ML attack
-  surface yet (TchTrainer/TchInferenceEngine are placeholder loops).
+  are not run in this environment (libtorch + RAM). As of Phase 3
+  Stages 6/7, `TchTrainer::train` runs a real feed-forward training
+  loop (Adam + MSE, exports to TorchScript bytes) and
+  `TchInferenceEngine::load/infer/rollback` run a real model load +
+  forward pass + rollback. The ML attack surface is now real: model
+  bytes are hash-validated + schema-validated before deserialisation
+  into a `tch::CModule`, and inference checks the
+  `inference_deadline_ms` budget. ML remains augmentative only (never
+  the authoritative flight-control path).
 - `polars` + `rayon` are wired into themql-analysis. No live analysis
   attack surface yet (RayonAnalysisPipeline runs a trivial parallel
   null-count).

@@ -107,13 +107,51 @@ deliberate, not an oversight.
 | themql-embedded | binary | SensorDriver trait, GpsDriver/BaroDriver/ImuDriver, SensorError 5 variants (TETANUS) | 10 |
 | themql-desktop | binary | Cli (clap), tokio main, ratatui/crossterm TUI dashboard, 3-pane layout | 13 |
 
-Total: 240 tests pass workspace-wide (default features) at Phase 2
+Total: 301 tests pass workspace-wide (default features) at Phase 3
 Stage 10 close. Per-crate counts: core 31+1doc, schema 6, message 4,
-query 11, runtime 6, cache 30, storage 29, transport 14, graphql 6,
-mqtt 14, sse 13, telemetry 14, analysis 9, training 5, inference 6,
-artifact 5, gnc 7, estimation 6, embedded 10, desktop 13. The
-`tch-backend` feature in training/inference compiles clean but tests
-are not run (libtorch + RAM constraints in this environment).
+query 11, runtime 6, cache 30, storage 29, transport 14, graphql 13,
+mqtt 14, sse 13, telemetry 14, analysis 12, training 6, inference 6,
+artifact 22, gnc 7, estimation 6, embedded 10, desktop 13. The
+`tch-backend` feature in training/inference compiles clean and now
+contains a real training loop (themql-training) and real model
+loading + forward pass (themql-inference); tests are still not run
+(libtorch + RAM constraints in this environment).
+
+### Phase 3 progress (2026-08-20)
+
+- Stages 6 & 7 — real training loop + real inference forward pass
+  (behind `tch-backend`). themql-training: `TchTrainer::train` builds
+  an MLP, trains with Adam + MSE for `config.epochs` (optional early
+  stopping), exports to `TorchScript` bytes via
+  `CModule::create_by_tracing` + temp-file `save`/read-back. The
+  `Dataset` type re-exports the polars-backed
+  `themql_analysis::Dataset` (added `polars` + `themql-analysis` deps).
+  themql-inference: `TchInferenceEngine::load()` runs
+  `HashValidator::validate` + rejects on errors + rejects empty bytes
+  on every load + deserialises into a `tch::CModule` pre-allocated at
+  activation; `infer()` runs the real forward pass, extracts the
+  output to a 21-dim `state_correction`, checks
+  `inference_deadline_ms`, populates `confidence` from the output
+  norm; `rollback()` reloads the previous bytes into a fresh
+  `CModule`. Pre-existing clippy lints fixed in themql-analysis (doc
+  backticks, unused import, cast precision, manual async) and
+  themql-artifact (redundant closures, similar_names). All touched
+  crates clippy-clean; `cargo check --features tch-backend` clean for
+  both. 6+6 default tests pass.
+- Stage 10 — real GraphQL resolver bridge + axum HTTP/WS integration in
+  themql-graphql. `GraphqlResolverBridgeImpl` wraps
+  `Arc<dyn themql_core::Resolver>`; `DispatchBridgeImpl` wraps
+  `Arc<dyn themql_core::MessageHandler>`. `QueryRoot.resource`/
+  `resources`, `MutationRoot.dispatch`, `SubscriptionRoot.subscribe`
+  (placeholder stream). `GraphqlSchemaImpl` holds the built schema.
+  `serve_graphql(schema) -> axum::Router` mounts `POST /graphql`
+  (query/mutation) + `GET /graphql` (WS subscription). Core
+  `Resolver`/`MessageHandler` made dyn-compatible (boxed futures,
+  `Send + Sync` supertraits, `ResolverBoxed` blanket-impl adapter
+  preserves `async fn` ergonomics). themql-mqtt: removed redundant
+  `Send + Sync` bounds on `impl MessageHandler` params. specs/graphql.toml
+  gained `http_library = "axum"` + `integration = "async-graphql-axum"`.
+  +8 tests in themql-graphql (6 → 13). Workspace 240 → 301 tests.
 
 ### Phase 2 progress (2026-08-20)
 
@@ -215,6 +253,18 @@ on theDAF. the embedded binary must not depend on theDAF.
 
 ## Decision log (chronological)
 
+- 2026-08-20: Phase 3 Stage 10 complete — real GraphQL resolver bridge
+  + axum HTTP/WS integration in themql-graphql. Made core
+  `Resolver`/`MessageHandler` dyn-compatible by boxing futures (return
+  `Pin<Box<dyn Future + Send + '_>>`, add `Send + Sync` supertraits).
+  Added `ResolverBoxed` trait + blanket `impl<T: ResolverBoxed>
+  Resolver for T` so implementors keep `async fn` ergonomics; the spec
+  signature `async fn resolve(&self, query: &Query, ctx: &Context) ->
+  Result<Response, Error>` is preserved semantically. The task required
+  `Arc<dyn themql_core::Resolver>`; the trait was previously not
+  dyn-compatible (used `impl Future`). Zero existing implementors in
+  the workspace, so no call-site breakage. 301 tests pass
+  workspace-wide.
 - 2026-08-20: Phase 2 Stage 11 complete — installed safety-critical
   tooling (cargo-deny, cargo-machete, cargo-bloat). cargo deny check
   passes (added BSL-1.0 + CDLA-Permissive-2.0 licenses). cargo machete
@@ -333,15 +383,28 @@ script in place. Follow-ups (not blockers):
 
 - Real nonlinear quaternion EKF dynamics + Jacobian-based Kalman gain
   (themql-estimation currently uses v0.1 simplified identity-gain placeholder).
-- Real SHA-256 (or BLAKE3) in themql-artifact HashValidator (currently a
-  placeholder fold hash — must replace before deployment).
-- Run `tch-backend` feature tests (TchTrainer, TchInferenceEngine) once
-  a beefier environment is available.
+- Real BLAKE3 in themql-artifact HashValidator — DONE (Phase 2 Stage
+  replaced the placeholder fold hash with `blake3::hash`).
+- Real training loop in TchTrainer + real model loading/forward pass
+  in TchInferenceEngine — DONE (Phase 3 Stages 6/7, behind
+  `tch-backend`). Run `tch-backend` feature tests once a beefier
+  environment is available (>7.8GB RAM).
+- Real analysis pipelines in RayonAnalysisPipeline — partially done
+  (polars DataFrame path is real; storage-query path uses byte-length
+  proxy values).
 - Real cachelito L1 (needs API redesign), real valkey L3 (needs driver
   maturity), real helix-db L4 (needs live server + KV mapping),
   key→subject index for pattern invalidation.
 - Real network I/O for transport adapters (SSE/MQTT/GraphQL currently
-  prove the trait surface compiles with heavy deps).
-- Real training loop in TchTrainer, real model loading in
-  TchInferenceEngine, real analysis pipelines in RayonAnalysisPipeline.
+  prove the trait surface compiles with heavy deps; SSE has a real
+  axum server, MQTT has a real client, GraphQL has a real resolver
+  bridge + axum HTTP/WS).
+- Investigate the pre-existing flaky
+  `themql-storage::helix_alias_works` sled temp connection failure
+  (BUG-0008, in the uncommitted working tree only).
 - Install mold + sccache for faster builds.
+- 2026-08-20: `themql-sse` real broadcast + axum server live.
+  `futures-util` is now a workspace dependency (used by themql-sse for
+  `stream::unfold`/`Stream`). `serve_sse` returns an `axum::Router`
+  with `GET /events` honoring `Last-Event-ID`; replay log cap
+  `REPLAY_LOG_CAPACITY = 256` per subject.

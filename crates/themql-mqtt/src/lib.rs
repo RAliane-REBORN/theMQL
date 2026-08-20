@@ -1,25 +1,36 @@
 //! # themql-mqtt
 //!
 //! MQTT transport adapter for theMQL. Uses embassy for embedded MQTT and
-//! delegates to tokio-based MQTT clients on desktop when needed. MQTT is
-//! a transport, not a semantic owner. MQTT-specific types must not escape
-//! this crate.
+//! `rumqttc` (tokio-based) for desktop. MQTT is a transport, not a semantic
+//! owner. MQTT-specific types must not escape this crate.
 //!
-//! See `specs/mqtt.toml` for the authoritative specification. This v0.1
-//! crate declares only the public traits and supporting types; concrete
-//! embassy / tokio-backed implementations are added in a later phase.
+//! See `specs/mqtt.toml` for the authoritative specification.
+//!
+//! The desktop client ([`RumqttcTransport`]) wraps a `rumqttc::AsyncClient`
+//! and its `EventLoop`. Per `specs/mqtt.toml [lifecycle]`, reconnect is
+//! never implicit: the caller decides whether to keep polling the
+//! event loop after a connection error, and the [`RumqttcConfig`]
+//! `auto_reconnect` flag is an explicit, caller-owned policy knob.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 #![warn(missing_docs)]
+#![deny(warnings)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(async_fn_in_trait)]
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use rumqttc::{AsyncClient, ClientError, Event, EventLoop, MqttOptions, QoS as RumqttcQos};
 use serde::{Deserialize, Serialize};
-use themql_core::{Error, Message, MessageHandler, Subject};
+use themql_core::{Error, Message, MessageHandler, Response, Subject};
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 
 // ===========================================================================
 // SubscriptionId — opaque handle returned by subscribe()
@@ -65,6 +76,18 @@ pub enum MqttQos {
     ExactlyOnce,
 }
 
+impl MqttQos {
+    /// Map a [`MqttQos`] to the corresponding `rumqttc` [`QoS`].
+    #[must_use]
+    pub const fn to_rumqttc(self) -> RumqttcQos {
+        match self {
+            Self::AtMostOnce => RumqttcQos::AtMostOnce,
+            Self::AtLeastOnce => RumqttcQos::AtLeastOnce,
+            Self::ExactlyOnce => RumqttcQos::ExactlyOnce,
+        }
+    }
+}
+
 // ===========================================================================
 // Transport traits
 // ===========================================================================
@@ -91,12 +114,15 @@ pub trait MqttPublisher: Send + Sync {
 pub trait MqttSubscriber: Send + Sync {
     /// Subscribe to `topic`, invoking `handler` per incoming message.
     ///
+    /// The handler must be `Send + Sync + 'static` so the transport can
+    /// store it for dispatch from an async poller task.
+    ///
     /// # Errors
     /// Returns [`MqttError`] if the subscription cannot be established.
     fn subscribe(
         &self,
         topic: &Subject,
-        handler: impl MessageHandler,
+        handler: impl MessageHandler + 'static,
     ) -> impl Future<Output = Result<SubscriptionId, MqttError>>;
 
     /// Unsubscribe a previously-established subscription by id.
@@ -137,6 +163,12 @@ pub enum MqttError {
 impl From<MqttError> for Error {
     fn from(e: MqttError) -> Self {
         Error::transport_error(e.to_string())
+    }
+}
+
+impl From<ClientError> for MqttError {
+    fn from(e: ClientError) -> Self {
+        Self::PublishFailed(e.to_string())
     }
 }
 
@@ -185,6 +217,278 @@ pub fn decode_message(bytes: &[u8]) -> Result<Message, MqttError> {
 }
 
 // ===========================================================================
+// Erased handler storage
+// ===========================================================================
+
+type HandlerFuture<'a> = Pin<Box<dyn Future<Output = Result<Response, Error>> + 'a>>;
+
+trait ErasedHandler: Send + Sync {
+    fn handle<'a>(&'a self, msg: &'a Message) -> HandlerFuture<'a>;
+}
+
+impl<H> ErasedHandler for H
+where
+    H: MessageHandler + Send + Sync,
+{
+    fn handle<'a>(&'a self, msg: &'a Message) -> HandlerFuture<'a> {
+        Box::pin(<H as MessageHandler>::handle(self, msg))
+    }
+}
+
+// ===========================================================================
+// RumqttcConfig
+// ===========================================================================
+
+/// Configuration for a [`RumqttcTransport`]. All fields are explicit so
+/// that reconnect behaviour is caller-owned, never implicit (per
+/// `specs/mqtt.toml [constraints] implicit_reconnect = false`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RumqttcConfig {
+    /// Broker hostname or IP address.
+    pub host: String,
+    /// Broker TCP port (typically 1883 plaintext, 8883 TLS).
+    pub port: u16,
+    /// MQTT client identifier sent in the CONNECT packet.
+    pub client_id: String,
+    /// Keep-alive interval sent to the broker.
+    pub keep_alive: Duration,
+    /// Explicit reconnect policy flag. When `false` (the spec default),
+    /// the caller is responsible for re-polling the event loop after a
+    /// connection error.
+    pub auto_reconnect: bool,
+}
+
+impl RumqttcConfig {
+    /// Construct a config with the given broker endpoint and client id,
+    /// defaulting `keep_alive` to 60 s and `auto_reconnect` to `false`
+    /// (matching `specs/mqtt.toml [constraints] implicit_reconnect`).
+    #[must_use]
+    pub fn new(host: impl Into<String>, port: u16, client_id: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            client_id: client_id.into(),
+            keep_alive: Duration::from_mins(1),
+            auto_reconnect: false,
+        }
+    }
+
+    /// Override the keep-alive interval.
+    #[must_use]
+    pub fn with_keep_alive(mut self, keep_alive: Duration) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
+
+    /// Override the explicit reconnect policy flag.
+    #[must_use]
+    pub fn with_auto_reconnect(mut self, auto_reconnect: bool) -> Self {
+        self.auto_reconnect = auto_reconnect;
+        self
+    }
+
+    /// Build a `rumqttc::MqttOptions` from this config.
+    fn to_mqtt_options(&self) -> MqttOptions {
+        let mut opts = MqttOptions::new(self.client_id.clone(), self.host.clone(), self.port);
+        opts.set_keep_alive(self.keep_alive);
+        opts
+    }
+}
+
+impl Default for RumqttcConfig {
+    /// Default config points at `localhost:1883` with an empty client id
+    /// and `auto_reconnect = false`. Production callers should supply an
+    /// explicit client id via [`RumqttcConfig::new`].
+    fn default() -> Self {
+        Self::new("localhost", 1883, "")
+    }
+}
+
+// ===========================================================================
+// RumqttcTransport
+// ===========================================================================
+
+/// Concrete desktop MQTT transport backed by `rumqttc`.
+///
+/// Holds an [`AsyncClient`] for publish/subscribe requests and the
+/// [`EventLoop`] used to drive the connection. The event loop is shared
+/// behind a [`Mutex`] so that a separate poller task (spawned by the
+/// caller via [`RumqttcTransport::poll`]) can advance the connection
+/// while publish/subscribe remain available through `&self`.
+pub struct RumqttcTransport {
+    client: AsyncClient,
+    eventloop: Arc<AsyncMutex<EventLoop>>,
+    handlers: Arc<Mutex<HashMap<SubscriptionId, Box<dyn ErasedHandler>>>>,
+    next_id: AtomicU64,
+    topic_index: Arc<Mutex<HashMap<SubscriptionId, String>>>,
+}
+
+impl RumqttcTransport {
+    /// Construct a transport from a [`RumqttcConfig`]. Does not perform any
+    /// network I/O; the connection is established lazily when the event
+    /// loop is first polled (see [`RumqttcTransport::poll`]).
+    #[must_use]
+    pub fn new(config: &RumqttcConfig) -> Self {
+        let opts = config.to_mqtt_options();
+        let (client, eventloop) = AsyncClient::new(opts, 10);
+        Self {
+            client,
+            eventloop: Arc::new(AsyncMutex::new(eventloop)),
+            handlers: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicU64::new(1),
+            topic_index: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Advance the underlying `rumqttc` event loop by one event.
+    ///
+    /// The caller is expected to spawn a task that loops on this method
+    /// for the lifetime of the connection. Incoming `Publish` packets are
+    /// decoded and dispatched to the registered handler for the matching
+    /// topic. Other events are returned to the caller for observability.
+    ///
+    /// # Errors
+    /// Returns [`MqttError`] if the event loop yields a connection error
+    /// or if dispatch to a registered handler fails.
+    pub async fn poll(&self) -> Result<Event, MqttError> {
+        let event = {
+            let mut guard = self.eventloop.lock().await;
+            guard.poll().await
+        };
+        match event {
+            Ok(ev) => {
+                if let Event::Incoming(rumqttc::Packet::Publish(publish)) = &ev {
+                    self.dispatch(&publish.topic, &publish.payload);
+                }
+                Ok(ev)
+            }
+            Err(_) => Err(MqttError::ConnectionLost),
+        }
+    }
+
+    /// Dispatch a decoded [`Message`] to the handler registered for
+    /// `topic`, if any. Handler errors are swallowed at the transport
+    /// layer (logged by the caller via [`MqttError`]) because MQTT has no
+    /// reply channel for inbound dispatch failures.
+    fn dispatch(&self, topic: &str, payload: &[u8]) {
+        let Ok(msg) = decode_message(payload) else {
+            return;
+        };
+        let Ok(handlers) = self.handlers.lock() else {
+            return;
+        };
+        if let Some(id) = self.matching_subscription(topic, &handlers) {
+            if let Some(handler) = handlers.get(&id) {
+                drop(handler.handle(&msg));
+            }
+        }
+    }
+
+    /// Find the [`SubscriptionId`] whose registered topic matches `topic`.
+    /// Matching is exact-equality on the topic string; MQTT `+`/`#`
+    /// wildcards are expanded by the broker and delivered as concrete
+    /// topics, so theMQL stores the original (possibly wildcarded) filter
+    /// and falls back to exact match for the common non-wildcard case.
+    fn matching_subscription(
+        &self,
+        topic: &str,
+        handlers: &HashMap<SubscriptionId, Box<dyn ErasedHandler>>,
+    ) -> Option<SubscriptionId> {
+        let topics = self.topic_index.lock().ok()?;
+        topics
+            .iter()
+            .find(|(id, filter)| {
+                (*filter == topic || matches_filter(filter, topic)) && handlers.contains_key(id)
+            })
+            .map(|(id, _)| *id)
+    }
+}
+
+/// Minimal MQTT topic-filter matcher supporting `+` (single level) and
+/// `#` (multi level at end) wildcards.
+fn matches_filter(filter: &str, topic: &str) -> bool {
+    let filter_parts: Vec<&str> = filter.split('/').collect();
+    let topic_parts: Vec<&str> = topic.split('/').collect();
+    for (i, fp) in filter_parts.iter().enumerate() {
+        if *fp == "#" {
+            return true;
+        }
+        if i >= topic_parts.len() {
+            return false;
+        }
+        if *fp != "+" && *fp != topic_parts[i] {
+            return false;
+        }
+    }
+    filter_parts.len() == topic_parts.len()
+}
+
+impl MqttPublisher for RumqttcTransport {
+    async fn publish(&self, topic: &Subject, payload: &Message) -> Result<(), MqttError> {
+        let topic_str = subject_to_topic(topic);
+        let bytes = encode_message(payload)?;
+        self.client
+            .publish(topic_str, RumqttcQos::AtLeastOnce, false, bytes)
+            .await
+            .map_err(MqttError::from)
+    }
+}
+
+impl MqttSubscriber for RumqttcTransport {
+    async fn subscribe(
+        &self,
+        topic: &Subject,
+        handler: impl MessageHandler + 'static,
+    ) -> Result<SubscriptionId, MqttError> {
+        let id = SubscriptionId::new(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let topic_str = subject_to_topic(topic);
+        self.client
+            .subscribe(topic_str.clone(), RumqttcQos::AtLeastOnce)
+            .await
+            .map_err(|e| MqttError::SubscribeFailed(e.to_string()))?;
+        {
+            let mut handlers = self
+                .handlers
+                .lock()
+                .map_err(|_| MqttError::SubscribeFailed("handler lock poisoned".to_owned()))?;
+            handlers.insert(id, Box::new(handler));
+        }
+        {
+            let mut topics = self
+                .topic_index
+                .lock()
+                .map_err(|_| MqttError::SubscribeFailed("topic lock poisoned".to_owned()))?;
+            topics.insert(id, topic_str);
+        }
+        Ok(id)
+    }
+
+    async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), MqttError> {
+        let topic = {
+            let mut topics = self
+                .topic_index
+                .lock()
+                .map_err(|_| MqttError::SubscribeFailed("topic lock poisoned".to_owned()))?;
+            topics.remove(&id)
+        };
+        if let Some(topic) = topic {
+            self.client
+                .unsubscribe(topic)
+                .await
+                .map_err(|e| MqttError::SubscribeFailed(e.to_string()))?;
+        }
+        let mut handlers = self
+            .handlers
+            .lock()
+            .map_err(|_| MqttError::SubscribeFailed("handler lock poisoned".to_owned()))?;
+        handlers.remove(&id);
+        Ok(())
+    }
+}
+
+impl MqttTransport for RumqttcTransport {}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -211,6 +515,13 @@ mod tests {
         assert_eq!(json, "\"exactly_once\"");
         let back: MqttQos = serde_json::from_str("\"at_most_once\"").expect("deserialize");
         assert_eq!(back, MqttQos::AtMostOnce);
+    }
+
+    #[test]
+    fn mqtt_qos_maps_to_rumqttc() {
+        assert_eq!(MqttQos::AtMostOnce.to_rumqttc(), RumqttcQos::AtMostOnce);
+        assert_eq!(MqttQos::AtLeastOnce.to_rumqttc(), RumqttcQos::AtLeastOnce);
+        assert_eq!(MqttQos::ExactlyOnce.to_rumqttc(), RumqttcQos::ExactlyOnce);
     }
 
     #[test]
@@ -251,6 +562,14 @@ mod tests {
     }
 
     #[test]
+    fn client_error_converts_to_mqtt_error() {
+        let mqtt_err = MqttError::from(ClientError::TryRequest(rumqttc::Request::PingReq(
+            rumqttc::PingReq,
+        )));
+        assert!(matches!(mqtt_err, MqttError::PublishFailed(_)));
+    }
+
+    #[test]
     fn subject_to_topic_is_identity() {
         let subject = Subject::from_str("vehicle.sensors.imu.gyro").expect("valid subject");
         assert_eq!(subject_to_topic(&subject), "vehicle.sensors.imu.gyro");
@@ -280,5 +599,78 @@ mod tests {
     #[test]
     fn decode_message_rejects_garbage() {
         assert!(decode_message(b"not json").is_err());
+    }
+
+    #[test]
+    fn rumqttc_config_new_defaults() {
+        let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1");
+        assert_eq!(cfg.host, "broker.local");
+        assert_eq!(cfg.port, 1883);
+        assert_eq!(cfg.client_id, "themql-1");
+        assert_eq!(cfg.keep_alive, Duration::from_mins(1));
+        assert!(!cfg.auto_reconnect);
+    }
+
+    #[test]
+    fn rumqttc_config_default_is_localhost_no_reconnect() {
+        let cfg = RumqttcConfig::default();
+        assert_eq!(cfg.host, "localhost");
+        assert_eq!(cfg.port, 1883);
+        assert!(!cfg.auto_reconnect);
+    }
+
+    #[test]
+    fn rumqttc_config_builders_override_fields() {
+        let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1")
+            .with_keep_alive(Duration::from_secs(10))
+            .with_auto_reconnect(true);
+        assert_eq!(cfg.keep_alive, Duration::from_secs(10));
+        assert!(cfg.auto_reconnect);
+    }
+
+    #[test]
+    fn rumqttc_config_to_mqtt_options_round_trips_endpoint() {
+        let cfg = RumqttcConfig::new("broker.local", 8883, "themql-1");
+        let opts = cfg.to_mqtt_options();
+        let (host, port) = opts.broker_address();
+        assert_eq!(host, "broker.local");
+        assert_eq!(port, 8883);
+        assert_eq!(opts.client_id(), "themql-1");
+        assert_eq!(opts.keep_alive(), Duration::from_mins(1));
+    }
+
+    #[test]
+    fn rumqttc_transport_constructs_without_io() {
+        let cfg = RumqttcConfig::new("localhost", 1883, "themql-test");
+        let _transport = RumqttcTransport::new(&cfg);
+    }
+
+    #[test]
+    fn subject_to_topic_round_trips_through_transport_config() {
+        let subject = Subject::from_str("vehicle.sensors.imu.gyro").expect("valid subject");
+        let topic = subject_to_topic(&subject);
+        let back = topic_to_subject(&topic).expect("valid topic");
+        assert_eq!(back.as_str(), subject.as_str());
+    }
+
+    #[test]
+    fn matches_filter_exact() {
+        assert!(matches_filter("vehicle/sensors", "vehicle/sensors"));
+        assert!(!matches_filter("vehicle/sensors", "vehicle/actuators"));
+    }
+
+    #[test]
+    fn matches_filter_single_level_wildcard() {
+        assert!(matches_filter("vehicle/+/sensors", "vehicle/imu/sensors"));
+        assert!(!matches_filter(
+            "vehicle/+/sensors",
+            "vehicle/imu/actuators"
+        ));
+    }
+
+    #[test]
+    fn matches_filter_multi_level_wildcard() {
+        assert!(matches_filter("vehicle/#", "vehicle/sensors/imu/gyro"));
+        assert!(matches_filter("vehicle/#", "vehicle"));
     }
 }

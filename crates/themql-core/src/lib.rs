@@ -40,6 +40,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -1382,27 +1383,62 @@ impl Message {
 
 /// Resolver for queries against a resource. Implementations are
 /// domain-specific (storage, analysis, telemetry).
-#[allow(async_fn_in_trait)]
-pub trait Resolver {
+///
+/// This trait is dyn-compatible: `resolve` returns a boxed future so
+/// that transport adapters can hold `Arc<dyn Resolver>`.
+pub trait Resolver: Send + Sync {
     /// Resolve a query against this resolver's resource.
     ///
     /// # Errors
     /// Returns [`Error`] if the query cannot be fulfilled.
+    fn resolve<'a>(
+        &'a self,
+        query: &'a Query,
+        ctx: &'a Context,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, Error>> + Send + 'a>>;
+}
+
+/// Blanket adapter: any `Resolver` whose `resolve` returns a
+/// `Send` future can be boxed into `dyn Resolver`.
+pub trait ResolverBoxed: Send + Sync {
+    /// Resolve a query against this resolver's resource.
+    ///
+    /// # Errors
+    /// Returns [`Error`] if the query cannot be fulfilled.
+    #[allow(async_fn_in_trait)]
     fn resolve(
         &self,
         query: &Query,
         ctx: &Context,
-    ) -> impl Future<Output = Result<Response, Error>>;
+    ) -> impl Future<Output = Result<Response, Error>> + Send;
+}
+
+impl<T> Resolver for T
+where
+    T: ResolverBoxed + ?Sized,
+{
+    fn resolve<'a>(
+        &'a self,
+        query: &'a Query,
+        ctx: &'a Context,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, Error>> + Send + 'a>> {
+        Box::pin(<T as ResolverBoxed>::resolve(self, query, ctx))
+    }
 }
 
 /// Handler for incoming messages.
-#[allow(async_fn_in_trait)]
-pub trait MessageHandler {
+///
+/// Dyn-compatible: `handle` returns a boxed future so transport
+/// adapters can hold `Arc<dyn MessageHandler>`.
+pub trait MessageHandler: Send + Sync {
     /// Handle an incoming message.
     ///
     /// # Errors
     /// Returns [`Error`] if the message cannot be handled.
-    fn handle(&self, msg: &Message) -> impl Future<Output = Result<Response, Error>>;
+    fn handle<'a>(
+        &'a self,
+        msg: &'a Message,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, Error>> + Send + 'a>>;
 }
 
 /// Orchestrator around [`Resolver`]: applies caching, batching, deadline

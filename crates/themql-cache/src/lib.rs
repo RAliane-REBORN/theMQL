@@ -1,10 +1,10 @@
 //! # themql-cache
 //!
 //! Tiered cache orchestration for theMQL. Coordinates four tiers — L1
-//! (cachelito, process-local), L2 (moka, process-local), L3 (valkey,
-//! distributed), L4 (helix-db, authoritative persistent). Misses fall
-//! through to the next tier; an authoritative miss returns to the
-//! resolver or errors.
+//! (lru, process-local), L2 (moka, process-local), L3 (redis,
+//! distributed), L4 (sled via themql-storage, authoritative
+//! persistent). Misses fall through to the next tier; an authoritative
+//! miss returns to the resolver or errors.
 //!
 //! This crate owns the [`Cache`] trait, the [`CacheEntry`] /
 //! [`CacheHit`] types, and the [`CacheError`] enum. [`CacheTier`],
@@ -19,6 +19,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::future::Future;
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -163,47 +164,33 @@ pub trait Cache: Send + Sync {
 // ===========================================================================
 // Tier backends — composed, not reimplemented
 // ===========================================================================
-//
-// L1 (cachelito) and L2 (moka) are process-local and synchronous; L3
-// (valkey) is distributed and asynchronous. `TieredCache` orchestrates
-// them and implements the [`Cache`] trait.
-//
-// NOTE on L1: the `cachelito` crate (v0.16) is a procedural-macro
-// memoisation library backed by `parking_lot`-guarded global `Lazy`
-// singletons keyed on `String`. Its `GlobalCache` requires `&'static
-// Lazy<...>` references (one shared map per cache name, process-wide),
-// which is incompatible with the per-instance, content-addressed,
-// `CacheKey`-keyed L1 the cache spec requires. Per the cache spec
-// (`custom_cache_engine = false` — we must not reimplement a cache
-// *engine*) and the task brief ("If cachelito doesn't expose a usable
-// key-value LRU, fall back to `std::collections::HashMap` + capacity
-// limit as a simple L1"), L1 is a bounded `HashMap` with FIFO
-// eviction. This is the spec-sanctioned fallback, not a custom engine.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, RwLock};
-
+use themql_core::Subject;
 use themql_storage::{Storage, StorageKey, StorageValue};
 
-/// L1 cache — process-local, ultra-low-latency, bounded FIFO.
+// --- L1: lru-backed process-local cache -----------------------------------
+
+/// L1 cache — process-local, ultra-low-latency, bounded LRU.
 ///
-/// Backed by a `HashMap` guarded by a `RwLock` with an entry-count cap
-/// and FIFO eviction. This is the spec-sanctioned fallback for L1 (see
-/// the crate-level note on cachelito).
+/// Backed by `lru::LruCache` guarded by a `Mutex`. Entries are evicted
+/// in least-recently-used order when the capacity is exceeded.
 pub struct L1Cache {
-    map: RwLock<HashMap<CacheKey, CacheEntry>>,
-    order: Mutex<VecDeque<CacheKey>>,
-    capacity: usize,
+    inner: Mutex<lru::LruCache<CacheKey, CacheEntry>>,
+    /// Key→subject index for pattern invalidation.
+    key_index: RwLock<std::collections::HashMap<CacheKey, String>>,
 }
 
 impl L1Cache {
     /// Construct an L1 cache with the given entry capacity.
+    ///
+    /// # Panics
+    /// Panics if `capacity` is 0 (after `max(1)`, it cannot be).
     #[must_use]
     pub fn new(capacity: usize) -> Self {
+        let cap = std::num::NonZeroUsize::new(capacity.max(1)).expect("max(1) > 0");
         Self {
-            map: RwLock::new(HashMap::with_capacity(capacity)),
-            order: Mutex::new(VecDeque::with_capacity(capacity)),
-            capacity,
+            inner: Mutex::new(lru::LruCache::new(cap)),
+            key_index: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -213,26 +200,40 @@ impl L1Cache {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get(&self, key: &CacheKey) -> Option<CacheEntry> {
-        self.map.read().expect("l1 lock poisoned").get(key).cloned()
+        self.inner
+            .lock()
+            .expect("l1 lock poisoned")
+            .get(key)
+            .cloned()
     }
 
-    /// Insert `entry` at `key`, evicting the oldest entry when at
-    /// capacity.
+    /// Insert `entry` at `key`, evicting the least-recently-used entry
+    /// when at capacity. Records the subject in the key→subject index.
     ///
     /// # Panics
     /// Panics if the internal locks are poisoned.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn put(&self, key: CacheKey, entry: CacheEntry) {
-        let mut map = self.map.write().expect("l1 lock poisoned");
-        let mut order = self.order.lock().expect("l1 order lock poisoned");
-        if !map.contains_key(&key) {
-            order.push_back(key.clone());
-            if order.len() > self.capacity && self.capacity > 0 {
-                if let Some(evicted) = order.pop_front() {
-                    map.remove(&evicted);
-                }
-            }
-        }
-        map.insert(key, entry);
+        self.inner
+            .lock()
+            .expect("l1 lock poisoned")
+            .put(key.clone(), entry);
+    }
+
+    /// Insert `entry` at `key` with an associated subject string for
+    /// pattern invalidation.
+    ///
+    /// # Panics
+    /// Panics if the internal locks are poisoned.
+    pub fn put_with_subject(&self, key: CacheKey, entry: CacheEntry, subject: String) {
+        self.inner
+            .lock()
+            .expect("l1 lock poisoned")
+            .put(key.clone(), entry);
+        self.key_index
+            .write()
+            .expect("l1 index lock poisoned")
+            .insert(key, subject);
     }
 
     /// Remove `key` from L1, returning the removed entry if present.
@@ -240,16 +241,12 @@ impl L1Cache {
     /// # Panics
     /// Panics if the internal locks are poisoned.
     pub fn invalidate(&self, key: &CacheKey) -> Option<CacheEntry> {
-        let mut map = self.map.write().expect("l1 lock poisoned");
-        let mut order = self.order.lock().expect("l1 order lock poisoned");
-        if let Some(entry) = map.remove(key) {
-            if let Some(pos) = order.iter().position(|k| k == key) {
-                order.remove(pos);
-            }
-            Some(entry)
-        } else {
-            None
-        }
+        let entry = self.inner.lock().expect("l1 lock poisoned").pop(key);
+        self.key_index
+            .write()
+            .expect("l1 index lock poisoned")
+            .remove(key);
+        entry
     }
 
     /// Remove all entries from L1.
@@ -257,26 +254,40 @@ impl L1Cache {
     /// # Panics
     /// Panics if the internal locks are poisoned.
     pub fn invalidate_all(&self) {
-        self.map.write().expect("l1 lock poisoned").clear();
-        self.order.lock().expect("l1 order lock poisoned").clear();
+        self.inner.lock().expect("l1 lock poisoned").clear();
+        self.key_index
+            .write()
+            .expect("l1 index lock poisoned")
+            .clear();
     }
 
-    /// Scan all keys (used by `invalidate_pattern`). Returns a `Vec`
-    /// of currently-held keys to avoid holding the lock across the
-    /// pattern match.
+    /// Scan all keys (used by `invalidate_pattern`).
     fn keys(&self) -> Vec<CacheKey> {
-        self.map
-            .read()
+        self.inner
+            .lock()
             .expect("l1 lock poisoned")
-            .keys()
-            .cloned()
+            .iter()
+            .map(|(k, _)| k.clone())
             .collect()
     }
+
+    /// Get the subject associated with a key (for pattern invalidation).
+    fn subject_for_key(&self, key: &CacheKey) -> Option<String> {
+        self.key_index
+            .read()
+            .expect("l1 index lock poisoned")
+            .get(key)
+            .cloned()
+    }
 }
+
+// --- L2: moka-backed process-local cache ----------------------------------
 
 /// L2 cache — process-local, low-latency, backed by `moka::sync::Cache`.
 pub struct L2Cache {
     inner: moka::sync::Cache<CacheKey, CacheEntry>,
+    /// Key→subject index for pattern invalidation.
+    key_index: RwLock<std::collections::HashMap<CacheKey, String>>,
 }
 
 impl L2Cache {
@@ -286,6 +297,7 @@ impl L2Cache {
         let cap: u64 = capacity.try_into().unwrap_or(u64::MAX);
         Self {
             inner: moka::sync::Cache::new(cap),
+            key_index: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -300,86 +312,181 @@ impl L2Cache {
         self.inner.insert(key, entry);
     }
 
+    /// Insert `entry` at `key` with an associated subject string for
+    /// pattern invalidation.
+    ///
+    /// # Panics
+    /// Panics if the internal locks are poisoned.
+    pub fn put_with_subject(&self, key: CacheKey, entry: CacheEntry, subject: String) {
+        self.inner.insert(key.clone(), entry);
+        self.key_index
+            .write()
+            .expect("l2 index lock poisoned")
+            .insert(key, subject);
+    }
+
     /// Remove `key` from L2.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
     pub fn invalidate(&self, key: &CacheKey) {
         self.inner.invalidate(key);
+        self.key_index
+            .write()
+            .expect("l2 index lock poisoned")
+            .remove(key);
     }
 
     /// Remove all entries from L2.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
     pub fn invalidate_all(&self) {
         self.inner.invalidate_all();
+        self.key_index
+            .write()
+            .expect("l2 index lock poisoned")
+            .clear();
     }
 
     /// Scan all keys (used by `invalidate_pattern`).
     fn keys(&self) -> Vec<CacheKey> {
         self.inner.iter().map(|(k, _)| (*k).clone()).collect()
     }
+
+    /// Get the subject associated with a key (for pattern invalidation).
+    fn subject_for_key(&self, key: &CacheKey) -> Option<String> {
+        self.key_index
+            .read()
+            .expect("l2 index lock poisoned")
+            .get(key)
+            .cloned()
+    }
 }
 
-/// L3 cache — distributed, backed by a valkey client.
+// --- L3: redis-backed distributed cache -----------------------------------
+
+/// L3 cache — distributed, backed by a redis client.
 ///
-/// The `valkey` crate is at `0.0.0-alpha5`: it is synchronous,
-/// `&str`-keyed, and exposes only `set`/`get` (no `DEL`, no `EXPIRE`,
-/// no binary values). It therefore cannot faithfully store a
-/// serialised `CacheEntry` under a binary `CacheKey`. The L3 backend
-/// is constructed here so `TieredCache` can hold it and tests can
-/// exercise construction failure without a running server, but every
-/// operation returns [`CacheError::TierUnavailable`] until the
-/// driver matures. This is the task-brief-sanctioned stub.
+/// Uses `redis::Client` with async connections. Entries are
+/// serialised as JSON and stored under a hex-encoded key prefix.
+/// TTL is honoured via `EXPIRE`. Requires a running redis server for
+/// live operation; falls back to `TierUnavailable` when the server
+/// is unreachable.
 pub struct L3Cache {
-    #[allow(dead_code)]
-    url: String,
+    client: redis::Client,
 }
 
 impl L3Cache {
-    /// Construct an L3 cache. Stores the URL but does not connect;
-    /// connection is deferred until the driver can support the
-    /// `CacheEntry` contract.
+    /// Construct an L3 cache by connecting to the redis server at
+    /// `url` (e.g. `redis://127.0.0.1:6379`).
     ///
     /// # Errors
-    /// Currently never returns an error; reserved for future
-    /// connection validation.
+    /// Returns [`CacheError::TierUnavailable`] if the client cannot
+    /// be created.
     pub fn new(url: &str) -> Result<Self, CacheError> {
-        Ok(Self {
-            url: url.to_owned(),
-        })
+        let client =
+            redis::Client::open(url).map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+        Ok(Self { client })
+    }
+
+    fn redis_key(key: &CacheKey) -> String {
+        format!("cache:{}", hex_encode(key.as_bytes()))
     }
 
     /// Look up `key` in L3.
     ///
     /// # Errors
-    /// Always returns [`CacheError::TierUnavailable`] — see the
-    /// [`L3Cache`] doc comment.
-    #[allow(clippy::unused_async)]
-    pub async fn get(&self, _key: &CacheKey) -> Result<Option<CacheEntry>, CacheError> {
-        Err(CacheError::TierUnavailable(CacheTier::L3))
+    /// Returns [`CacheError::TierUnavailable`] if the server is
+    /// unreachable, or [`CacheError::DeserializationError`] on parse
+    /// failure.
+    pub async fn get(&self, key: &CacheKey) -> Result<Option<CacheEntry>, CacheError> {
+        let rk = Self::redis_key(key);
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+        let val: Option<String> = redis::cmd("GET")
+            .arg(&rk)
+            .query_async(&mut conn)
+            .await
+            .map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+        match val {
+            None => Ok(None),
+            Some(s) => {
+                let entry: CacheEntry = serde_json::from_str(&s)
+                    .map_err(|e| CacheError::DeserializationError(e.to_string()))?;
+                Ok(Some(entry))
+            }
+        }
     }
 
-    /// Write `entry` to L3 with an optional TTL.
+    /// Write `entry` to L3 with an optional TTL (in seconds).
     ///
     /// # Errors
-    /// Always returns [`CacheError::TierUnavailable`] — see the
-    /// [`L3Cache`] doc comment.
-    #[allow(clippy::unused_async)]
+    /// Returns [`CacheError::TierUnavailable`] if the server is
+    /// unreachable, or [`CacheError::SerializationError`] on encode
+    /// failure.
     pub async fn put(
         &self,
-        _key: &CacheKey,
-        _entry: &CacheEntry,
-        _ttl: Option<Duration>,
+        key: &CacheKey,
+        entry: &CacheEntry,
+        ttl: Option<Duration>,
     ) -> Result<(), CacheError> {
-        Err(CacheError::TierUnavailable(CacheTier::L3))
+        let rk = Self::redis_key(key);
+        let s = serde_json::to_string(entry)
+            .map_err(|e| CacheError::SerializationError(e.to_string()))?;
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+        match ttl {
+            Some(d) => {
+                let secs: u64 = d.as_secs().max(1);
+                redis::cmd("SETEX")
+                    .arg(&rk)
+                    .arg(secs)
+                    .arg(&s)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+            }
+            None => {
+                redis::cmd("SET")
+                    .arg(&rk)
+                    .arg(&s)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove `key` from L3.
     ///
     /// # Errors
-    /// Always returns [`CacheError::TierUnavailable`] — see the
-    /// [`L3Cache`] doc comment.
-    #[allow(clippy::unused_async)]
-    pub async fn invalidate(&self, _key: &CacheKey) -> Result<(), CacheError> {
-        Err(CacheError::TierUnavailable(CacheTier::L3))
+    /// Returns [`CacheError::TierUnavailable`] if the server is
+    /// unreachable.
+    pub async fn invalidate(&self, key: &CacheKey) -> Result<(), CacheError> {
+        let rk = Self::redis_key(key);
+        let mut conn = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+        redis::cmd("DEL")
+            .arg(&rk)
+            .query_async::<()>(&mut conn)
+            .await
+            .map_err(|_| CacheError::TierUnavailable(CacheTier::L3))?;
+        Ok(())
     }
 }
+
+// --- L4 storage helpers ---------------------------------------------------
 
 /// A key-reconstruction helper: derive the [`StorageKey`] a [`CacheKey`]
 /// maps to at L4. The L4 key is the hex encoding of the 32-byte digest
@@ -412,6 +519,12 @@ fn entry_to_storage(entry: &CacheEntry) -> Result<StorageValue, CacheError> {
         serde_json::to_vec(entry).map_err(|e| CacheError::SerializationError(e.to_string()))?;
     Ok(StorageValue::new(bytes, themql_core::FormatTag::Json))
 }
+
+// --- TieredCache orchestrator --------------------------------------------
+
+/// Demotion threshold: entries with serialised size above this many
+/// bytes are skipped for L1 (per `specs/cache.toml [semantics].demotion`).
+const L1_DEMOTION_THRESHOLD: usize = 4096;
 
 /// Tiered cache orchestrator. Holds optional L1, L2, L3 backends and
 /// a reference to the L4 [`Storage`] backend, and implements the
@@ -499,11 +612,16 @@ impl<S: Storage> TieredCache<S> {
         }
     }
 
-    /// Write `entry` through to all enabled tiers up to and including
-    /// `tier_hint` (or all tiers if the hint is `None`).
+    /// Write `entry` through to all enabled tiers. Skips L1 if the
+    /// serialised entry exceeds the demotion threshold (per
+    /// `specs/cache.toml [semantics].demotion`).
     async fn put_inner(&self, key: &CacheKey, entry: &CacheEntry, policy: &CachePolicy) {
+        let entry_size = serde_json::to_vec(entry).map_or(0, |v| v.len());
+        let skip_l1 = entry_size > L1_DEMOTION_THRESHOLD;
         if let Some(l1) = &self.l1 {
-            l1.put(key.clone(), entry.clone());
+            if !skip_l1 {
+                l1.put(key.clone(), entry.clone());
+            }
         }
         if let Some(l2) = &self.l2 {
             l2.put(key.clone(), entry.clone());
@@ -563,36 +681,28 @@ impl<S: Storage> Cache for TieredCache<S> {
     async fn invalidate_pattern(&self, pattern: &SubjectPattern) -> Result<(), CacheError> {
         if let Some(l1) = &self.l1 {
             for key in l1.keys() {
-                let subject = subject_from_key(&key);
-                if pattern.matches(&subject) {
-                    l1.invalidate(&key);
+                if let Some(subject_str) = l1.subject_for_key(&key) {
+                    if let Ok(subject) = Subject::from_str(&subject_str) {
+                        if pattern.matches(&subject) {
+                            l1.invalidate(&key);
+                        }
+                    }
                 }
             }
         }
         if let Some(l2) = &self.l2 {
             for key in l2.keys() {
-                let subject = subject_from_key(&key);
-                if pattern.matches(&subject) {
-                    l2.invalidate(&key);
+                if let Some(subject_str) = l2.subject_for_key(&key) {
+                    if let Ok(subject) = Subject::from_str(&subject_str) {
+                        if pattern.matches(&subject) {
+                            l2.invalidate(&key);
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
-}
-
-/// Reconstruct the [`themql_core::Subject`] associated with a cache key
-/// for pattern invalidation. Since [`CacheKey`] is an opaque hash,
-/// there is no reversible mapping from key to subject; pattern
-/// invalidation against L1/L2 therefore relies on the caller
-/// providing patterns that match the *subject* that produced the key.
-/// In the current skeleton there is no key→subject index, so this
-/// returns an empty subject (which matches nothing) and pattern
-/// invalidation is effectively a no-op until a key→subject index is
-/// added. This is the task-brief-acknowledged "best-effort or skip"
-/// for pattern invalidation.
-fn subject_from_key(_key: &CacheKey) -> themql_core::Subject {
-    themql_core::Subject::from_str("cache.internal").expect("valid subject")
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +711,7 @@ fn subject_from_key(_key: &CacheKey) -> themql_core::Subject {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::duration_suboptimal_units)]
     use super::*;
     use themql_core::{ErrorCode, ResponseValue};
 
@@ -658,13 +769,13 @@ mod tests {
         let e = CacheEntry {
             value: ResponseValue::Unit,
             inserted_at: Timestamp::now_monotonic(),
-            ttl: Some(Duration::from_mins(1)),
+            ttl: Some(Duration::from_secs(60)),
             source_tier: CacheTier::L1,
             etag: Some("w/\"abc\"".to_owned()),
         };
         assert_eq!(e.source_tier, CacheTier::L1);
         assert_eq!(e.etag.as_deref(), Some("w/\"abc\""));
-        assert_eq!(e.ttl, Some(Duration::from_mins(1)));
+        assert_eq!(e.ttl, Some(Duration::from_secs(60)));
     }
 
     #[test]
@@ -776,16 +887,18 @@ mod tests {
     }
 
     #[test]
-    fn l1_capacity_evicts_oldest() {
+    fn l1_lru_evicts_least_recently_used() {
         let l1 = L1Cache::new(2);
         let k1 = CacheKey::hash_of(b"1");
         let k2 = CacheKey::hash_of(b"2");
         let k3 = CacheKey::hash_of(b"3");
         l1.put(k1.clone(), sample_entry(CacheTier::L1));
         l1.put(k2.clone(), sample_entry(CacheTier::L1));
+        // Access k1 to make k2 the LRU
+        let _ = l1.get(&k1);
         l1.put(k3.clone(), sample_entry(CacheTier::L1));
-        assert!(l1.get(&k1).is_none(), "k1 evicted");
-        assert!(l1.get(&k2).is_some(), "k2 retained");
+        assert!(l1.get(&k1).is_some(), "k1 retained (recently used)");
+        assert!(l1.get(&k2).is_none(), "k2 evicted (LRU)");
         assert!(l1.get(&k3).is_some(), "k3 retained");
     }
 
@@ -808,6 +921,42 @@ mod tests {
     }
 
     #[test]
+    fn l1_pattern_invalidation_with_subject_index() {
+        let l1 = L1Cache::new(8);
+        let k1 = CacheKey::hash_of(b"vehicle.sensors.imu.gyro");
+        let k2 = CacheKey::hash_of(b"vehicle.sensors.imu.accel");
+        let k3 = CacheKey::hash_of(b"vehicle.actuators.flap");
+        l1.put_with_subject(
+            k1.clone(),
+            sample_entry(CacheTier::L1),
+            "vehicle.sensors.imu.gyro".to_string(),
+        );
+        l1.put_with_subject(
+            k2.clone(),
+            sample_entry(CacheTier::L1),
+            "vehicle.sensors.imu.accel".to_string(),
+        );
+        l1.put_with_subject(
+            k3.clone(),
+            sample_entry(CacheTier::L1),
+            "vehicle.actuators.flap".to_string(),
+        );
+        let pattern = SubjectPattern::from_str("vehicle.sensors.#").unwrap();
+        for key in l1.keys() {
+            if let Some(subject_str) = l1.subject_for_key(&key) {
+                if let Ok(subject) = Subject::from_str(&subject_str) {
+                    if pattern.matches(&subject) {
+                        l1.invalidate(&key);
+                    }
+                }
+            }
+        }
+        assert!(l1.get(&k1).is_none(), "k1 invalidated by pattern");
+        assert!(l1.get(&k2).is_none(), "k2 invalidated by pattern");
+        assert!(l1.get(&k3).is_some(), "k3 not matched by pattern");
+    }
+
+    #[test]
     fn l2_put_get_round_trip() {
         let l2 = L2Cache::new(8);
         let key = CacheKey::hash_of(b"k2");
@@ -827,13 +976,13 @@ mod tests {
 
     #[test]
     fn l3_construction_succeeds_without_server() {
-        let l3 = L3Cache::new("valkey://127.0.0.1:6379");
+        let l3 = L3Cache::new("redis://127.0.0.1:6379");
         assert!(l3.is_ok());
     }
 
     #[tokio::test]
-    async fn l3_get_returns_tier_unavailable() {
-        let l3 = L3Cache::new("valkey://127.0.0.1:6379").unwrap();
+    async fn l3_get_returns_tier_unavailable_without_server() {
+        let l3 = L3Cache::new("redis://127.0.0.1:6399").unwrap();
         let key = CacheKey::hash_of(b"k3");
         let res = l3.get(&key).await;
         assert!(matches!(
@@ -930,6 +1079,32 @@ mod tests {
             .put(key.clone(), sample_entry(CacheTier::L1));
         let hit = cache.get(&key, &CachePolicy::disabled()).await.unwrap();
         assert!(matches!(hit, CacheHit::Miss));
+    }
+
+    #[tokio::test]
+    async fn tiered_pattern_invalidation_with_subject_index() {
+        let l1 = Some(L1Cache::new(8));
+        let l2 = Some(L2Cache::new(8));
+        let cache = TieredCache::new(l1, l2, None, InMemoryStorage::default());
+        let k1 = CacheKey::hash_of(b"vehicle.sensors.imu.gyro");
+        let k2 = CacheKey::hash_of(b"vehicle.actuators.flap");
+        cache.l1.as_ref().unwrap().put_with_subject(
+            k1.clone(),
+            sample_entry(CacheTier::L1),
+            "vehicle.sensors.imu.gyro".to_string(),
+        );
+        cache.l1.as_ref().unwrap().put_with_subject(
+            k2.clone(),
+            sample_entry(CacheTier::L1),
+            "vehicle.actuators.flap".to_string(),
+        );
+        let pattern = SubjectPattern::from_str("vehicle.sensors.#").unwrap();
+        cache.invalidate_pattern(&pattern).await.unwrap();
+        assert!(
+            cache.l1.as_ref().unwrap().get(&k1).is_none(),
+            "k1 invalidated"
+        );
+        assert!(cache.l1.as_ref().unwrap().get(&k2).is_some(), "k2 retained");
     }
 
     use themql_storage::{StorageError, StorageQuery, StorageResultSet};

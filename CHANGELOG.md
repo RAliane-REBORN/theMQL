@@ -5,6 +5,137 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 3 Stages 6 & 7: real training loop + real inference forward pass
+
+Replaced the placeholder `tch-backend` implementations in
+`themql-training` and `themql-inference` with real training and
+inference logic. Both are behind the `tch-backend` feature; default
+features still expose the trait surface only.
+
+#### themql-training (Stage 6)
+- `TchTrainer::train` now runs a real feed-forward training loop:
+  builds an MLP (`feat_dim` → `2×feat_dim` hidden → `label_dim`) via
+  `tch::nn::seq` + `tch::nn::linear`, trains with Adam
+  (`tch::nn::Optimizer`, `config.weight_decay`) and MSE loss for
+  `config.epochs`, batches by `config.batch_size`.
+- Optional early stopping: tracks best loss, stops after
+  `EarlyStoppingConfig.patience` stale epochs.
+- Exports the trained network to `TorchScript` bytes via
+  `CModule::create_by_tracing` + `CModule::save` to a temp file (read
+  back as bytes). Returns a `TrainedModel` (format `TorchScript`).
+- Validates config (`epochs`/`batch_size`/`learning_rate` > 0) and
+  dataset (non-empty, schema width matches frame width, label rows
+  match feature rows); returns `TrainingError::Diverged` on NaN/Inf
+  loss.
+- `Dataset` re-exports the polars-backed
+  `themql_analysis::Dataset` (was `Vec<Vec<f64>>`). Added `polars` +
+  `themql-analysis` deps.
+- New tests (default): `dataset_reexports_polars_dataset_type`.
+- New tch-backend tests: `tch_trainer_rejects_zero_epochs`,
+  `tch_trainer_artifact_writer_accepts_model` (round-trips the trained
+  model through `BincodeArtifactWriter::write`).
+
+#### themql-inference (Stage 7)
+- `TchInferenceEngine::load()` now runs
+  `themql_artifact::HashValidator::new().validate(&artifact)` and
+  rejects on any `report.errors`; rejects empty bytes on EVERY load
+  (not just the first, as the placeholder did); deserialises
+  `model_bytes` into a `tch::CModule` via `CModule::load_data` and
+  stores it pre-allocated at activation.
+- `infer()` runs the real forward pass
+  (`module.forward_ts(&[input])` under `no_grad`), extracts the output
+  to a 21-dim `state_correction` via `f_copy_data::<f32>`, checks
+  `budget.inference_deadline_ms` against actual latency
+  (`DeadlineExceeded` on overrun), populates `confidence` from the
+  output norm (`1/(1+||correction||)`).
+- `rollback()` reloads the previous bytes from the `RollbackHandle`
+  into a fresh `CModule` and restores it as active.
+- Re-exported `ArtifactValidator` from `themql-artifact` so the
+  validator trait is in scope for `load()`.
+
+#### Pre-existing cleanup (required by new deps)
+- `themql-analysis`: fixed pre-existing clippy lints (doc backticks,
+  unused `StorageValue` import, `cast_precision_loss` via a
+  `usize_to_f64` helper, `manual_async_fn` allow on
+  `StorageAnalysisPipeline`).
+- `themql-artifact`: fixed pre-existing clippy lints (redundant
+  closures in `FileArtifactLoader`, `similar_names` in tests).
+
+#### Validation
+- `cargo test -p themql-training`: 6 tests, 0 failures (default).
+- `cargo test -p themql-inference`: 6 tests, 0 failures (default).
+- `cargo check -p themql-training --features tch-backend`: clean.
+- `cargo check -p themql-inference --features tch-backend`: clean.
+- `cargo clippy -p themql-training -p themql-inference -p themql-analysis
+  -p themql-artifact --all-targets -- -D warnings`: clean.
+- `cargo fmt --check` clean for all touched crates.
+- `cargo check --workspace`: green.
+- TOML parse sanity passes.
+- `tch-backend` feature tests NOT run (libtorch C++ build needs more
+  RAM than this environment has — 7.8GB, no swap).
+- All code `#![forbid(unsafe_code)]`.
+
+### 2026-08-20 — Phase 3 Stage 10: real GraphQL resolver bridge + axum HTTP/WS integration
+
+Replaced the placeholder `themql-graphql` roots with a real resolver
+bridge, concrete root fields, a built-schema holder, and an axum HTTP/WS
+integration. Made the core `Resolver` and `MessageHandler` traits
+dyn-compatible so the bridge can hold `Arc<dyn Resolver>` / `Arc<dyn
+MessageHandler>` as required.
+
+#### themql-graphql
+- `GraphqlResolverBridge` is now dyn-compatible (boxed future).
+- `GraphqlResolverBridgeImpl` wraps `Arc<dyn themql_core::Resolver>`,
+  builds a `Query` from the GraphQL field/args, delegates to the
+  resolver, projects `ResponseValue` → JSON.
+- `DispatchBridge` (new dyn-compatible trait) + `DispatchBridgeImpl`
+  wrap `Arc<dyn themql_core::MessageHandler>` for mutations.
+- `QueryRoot` now has `resource(subject, selection, args)` and
+  `resources(pattern)` fields calling the resolver bridge.
+- `MutationRoot` now has `dispatch(subject, payload)` calling the
+  dispatch bridge.
+- `SubscriptionRoot` now has a `#[Subscription] subscribe(subject)`
+  field emitting a placeholder stream (TODO: real `themql-message`
+  stream wiring in a later stage).
+- `GraphqlSchemaImpl` (new) holds a built
+  `async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>`.
+- `serve_graphql(schema) -> axum::Router` mounts `POST /graphql`
+  (query/mutation via `GraphQL`) and `GET /graphql` (subscription via
+  WebSocket upgrade, `GraphQLSubscription`).
+- New deps: `axum`, `async-graphql-axum`, `futures-util`, `serde` (was
+  already a transitive need).
+- 13 tests (was 5): kept existing error-mapping tests, added
+  resolver-bridge construction, schema build with real bridge,
+  `resource` query integration, `dispatch` mutation integration,
+  `serve_graphql` router build, `response_value_to_json` unit tests,
+  invalid-subject rejection.
+- `#![forbid(unsafe_code)]`, `#![deny(warnings)]`, clippy pedantic clean.
+
+#### themql-core
+- `Resolver` and `MessageHandler` made dyn-compatible: `resolve`/`handle`
+  now return `Pin<Box<dyn Future<...> + Send + '_>>` and the traits have
+  `Send + Sync` supertraits.
+- Added `ResolverBoxed` trait + blanket `impl<T: ResolverBoxed>
+  Resolver for T` so implementors keep the `async fn` ergonomics. The
+  spec signature `async fn resolve(&self, query: &Query, ctx:
+  &Context) -> Result<Response, Error>` is preserved semantically.
+- Added `use std::pin::Pin;`.
+- Zero existing implementors in the workspace, so no call-site breakage.
+
+#### themql-mqtt
+- Removed now-redundant `Send + Sync` bounds on `impl MessageHandler`
+  parameters (clippy `implied_bounds_in_impls` after the
+  `MessageHandler` supertrait change).
+
+#### specs/graphql.toml
+- `[implementation]` gained `http_library = "axum"` and `integration =
+  "async-graphql-axum"`.
+
+Validation: `cargo test -p themql-graphql` (13 tests), `cargo clippy -p
+themql-graphql --all-targets -- -D warnings` clean, `cargo fmt` clean
+for touched crates. Workspace `cargo test --workspace` green (301
+tests). No `unsafe`. TOML parse sanity passes.
+
 ### 2026-08-20 — Phase 2 Stage 12: final validation + commit + PR
 
 Ran the complete validation suite (all 7 gates green), updated all 8
@@ -1001,3 +1132,25 @@ before writing by splitting model creation from model execution:
   still have empty `lib.rs` files; the four crates implemented here
   define their dependent types locally rather than depending on those
   empty crates, per the task brief.
+
+## 2026-08-20 — Phase 3 Stage 8: themql-sse real broadcast + axum server
+
+- `crates/themql-sse/src/lib.rs`: replaced placeholder `broadcast::Sender<()>`
+  with `broadcast::Sender<Arc<SseEvent>>`; `TokioSsePublisher::broadcast`
+  now sends real events and maintains a bounded (`VecDeque`, cap 256)
+  per-subject event log for Last-Event-ID replay (`replay_after`).
+- `TokioSseStream::next_event` returns the real `SseEvent` from the
+  channel (was a synthetic `{}`).
+- Added `serve_sse(publisher, subject) -> axum::Router` exposing
+  `GET /events` producing `text/event-stream` responses with
+  `Last-Event-ID` header replay, keep-alive, via `futures_util::stream::unfold`.
+- Wire-format helpers (`to_wire_string`, `from_message`, `from_data`)
+  unchanged.
+- Tests: 17 pass (was 11); added real-event broadcast, multi-subscriber
+  broadcast, Last-Event-ID replay, unknown-id full-log replay.
+- `#![forbid(unsafe_code)]`, `#![deny(warnings)]`, `clippy::pedantic`
+  clean; no inline comments.
+- Added `axum.workspace = true` and `futures-util = "0.3"` (workspace
+  dep) to `crates/themql-sse/Cargo.toml`; updated tokio features to
+  `["rt","sync","net"]`.
+- `specs/sse.toml`: added `http_library = "axum"` to `[implementation]`.

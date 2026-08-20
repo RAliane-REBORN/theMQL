@@ -23,7 +23,7 @@
 use nalgebra::SVector;
 use thiserror::Error;
 
-pub use themql_artifact::{ActivationHandle, ArtifactError, ModelArtifact};
+pub use themql_artifact::{ActivationHandle, ArtifactError, ArtifactValidator, ModelArtifact};
 pub use themql_schema::TrainedModel;
 
 use themql_core::Timestamp;
@@ -246,14 +246,17 @@ pub fn now_timestamp() -> Timestamp {
 // TchInferenceEngine — tch-backed inference (behind `tch-backend` feature)
 // ===========================================================================
 
-/// tch-backed [`InferenceEngine`]. Activates a [`ModelArtifact`] and runs
-/// a dummy forward pass per `infer()`. Per `specs/inference.toml`, tch is
-/// the primary tensor framework on embedded. This minimal implementation
-/// proves tch compiles and the trait is implemented; real model loading
-/// is deferred.
+/// tch-backed [`InferenceEngine`]. Activates a [`ModelArtifact`] after
+/// running the full `themql-artifact::HashValidator` validation pipeline,
+/// deserialises the model bytes into a `tch::CModule` (pre-allocated at
+/// activation), and runs a real forward pass per `infer()`. Per
+/// `specs/inference.toml`, tch is the primary tensor framework on
+/// embedded; inference is augmentative only and never the authoritative
+/// flight-control path.
 #[cfg(feature = "tch-backend")]
 pub struct TchInferenceEngine {
     active: Option<ModelArtifact>,
+    module: Option<tch::CModule>,
     previous: Option<ModelArtifact>,
 }
 
@@ -264,6 +267,7 @@ impl TchInferenceEngine {
     pub fn new() -> Self {
         Self {
             active: None,
+            module: None,
             previous: None,
         }
     }
@@ -277,17 +281,35 @@ impl Default for TchInferenceEngine {
 }
 
 #[cfg(feature = "tch-backend")]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 impl InferenceEngine for TchInferenceEngine {
     fn load(&mut self, artifact: ModelArtifact) -> Result<ActivationHandle, InferenceError> {
-        if self.active.is_none() && artifact.model_bytes.is_empty() {
+        if artifact.model_bytes.is_empty() {
             return Err(InferenceError::ArtifactInvalid(
                 "empty model bytes".to_string(),
             ));
         }
+        let validator = themql_artifact::HashValidator::new();
+        let report = validator
+            .validate(&artifact)
+            .map_err(InferenceError::from)?;
+        if !report.errors.is_empty() {
+            let msg = report
+                .errors
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(InferenceError::ArtifactInvalid(msg));
+        }
+        let mut cursor = std::io::Cursor::new(&artifact.model_bytes);
+        let cmodule = tch::CModule::load_data(&mut cursor)
+            .map_err(|e| InferenceError::ArtifactInvalid(e.to_string()))?;
         let model_id = artifact.metadata.model_id.clone();
         if let Some(prev) = self.active.take() {
             self.previous = Some(prev);
         }
+        self.module = Some(cmodule);
         self.active = Some(artifact);
         Ok(ActivationHandle {
             model_id,
@@ -296,21 +318,55 @@ impl InferenceEngine for TchInferenceEngine {
     }
 
     fn infer(&self, input: &InferenceInput) -> Result<InferenceOutput, InferenceError> {
-        if self.active.is_none() {
-            return Err(InferenceError::ModelNotLoaded);
+        let active = self.active.as_ref().ok_or(InferenceError::ModelNotLoaded)?;
+        let module = self.module.as_ref().ok_or(InferenceError::ModelNotLoaded)?;
+        if active.model_bytes.is_empty() {
+            return Err(InferenceError::ArtifactInvalid(
+                "empty model bytes on active artifact".to_string(),
+            ));
         }
         let state_slice: &[f64] = input.state.as_slice();
         let len = i64::try_from(state_slice.len())
             .map_err(|_| InferenceError::InferenceFailed("state length overflow".to_string()))?;
-        let t = tch::Tensor::from_slice(state_slice)
+        let start = std::time::Instant::now();
+        let input_t = tch::Tensor::from_slice(state_slice)
             .to_kind(tch::Kind::Float)
             .reshape([1, len]);
-        let _out = t.tanh();
-        let start = std::time::Instant::now();
+        let out_t = tch::no_grad(|| module.forward_ts(&[input_t]))
+            .map_err(|e| InferenceError::InferenceFailed(e.to_string()))?;
+        let out_len = out_t.numel();
+        let mut buf = vec![0_f32; out_len.min(STATE_DIM)];
+        let copy_n = buf.len();
+        let _ = out_t
+            .to_kind(tch::Kind::Float)
+            .f_copy_data(&mut buf, copy_n)
+            .map_err(|e| InferenceError::InferenceFailed(e.to_string()))?;
+        let mut correction = nalgebra::SVector::<f64, STATE_DIM>::zeros();
+        for (i, v) in buf.iter().enumerate() {
+            if i < STATE_DIM {
+                correction[i] = f64::from(*v);
+            }
+        }
         let latency_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let latency_ms = u16::try_from(start.elapsed().as_millis()).unwrap_or(u16::MAX);
+        if latency_ms > input.budget.inference_deadline_ms {
+            return Err(InferenceError::DeadlineExceeded {
+                deadline_ms: input.budget.inference_deadline_ms,
+                actual_ms: latency_ms,
+            });
+        }
+        let norm: f64 = correction
+            .iter()
+            .map(|v| {
+                let av = v.abs();
+                av * av
+            })
+            .sum::<f64>()
+            .sqrt();
+        let confidence = 1.0 / (1.0 + norm);
         Ok(InferenceOutput {
-            state_correction: nalgebra::SVector::<f64, STATE_DIM>::zeros(),
-            confidence: 1.0,
+            state_correction: correction,
+            confidence,
             latency_ns,
         })
     }
@@ -320,7 +376,10 @@ impl InferenceEngine for TchInferenceEngine {
         let prev = self.previous.take().ok_or_else(|| {
             InferenceError::RollbackFailed("no previous model retained".to_string())
         })?;
-        let _ = bytes;
+        let mut cursor = std::io::Cursor::new(&bytes);
+        let cmodule = tch::CModule::load_data(&mut cursor)
+            .map_err(|e| InferenceError::RollbackFailed(e.to_string()))?;
+        self.module = Some(cmodule);
         self.active = Some(prev);
         Ok(())
     }

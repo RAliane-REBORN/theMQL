@@ -36,7 +36,7 @@ write_back = false  # never deferred — explicit only
 # ---------------------------------------------------------------------------
 
 [L1]
-implementation = "cachelito"
+implementation = "lru"
 scope = "local"
 authority = "ephemeral"
 latency = "ultra_low"
@@ -48,13 +48,13 @@ authority = "ephemeral"
 latency = "low"
 
 [L3]
-implementation = "valkey"
+implementation = "redis"
 scope = "distributed"
 authority = "ephemeral"
 latency = "network"
 
 [L4]
-implementation = "helixdb"
+implementation = "sled"
 scope = "authoritative"
 authority = "persistent"
 

@@ -5,9 +5,7 @@
 //! theDAF adapter for legacy data access and migration reference.
 //!
 //! Per `specs/analysis.toml`, polars is the semantic owner of dataframe
-//! operations and rayon provides parallelism. Both are deferred to a
-//! future task; this module defines the trait surface, minimal types,
-//! and error mapping only.
+//! operations and rayon provides parallelism.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
@@ -18,21 +16,18 @@ use std::future::Future;
 
 use polars::frame::DataFrame;
 use polars::prelude::{Float64Chunked, IntoSeries};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use themql_core::{Context, Error, ErrorCode, SubjectPattern, Timestamp};
+use themql_schema::{FeatureDType, FeatureSchema, FeatureSpec, NormalizationSpec};
+use themql_storage::{Storage, StorageQuery, StorageResultSet};
 
 // ===========================================================================
 // AnalysisInput
 // ===========================================================================
 
-/// Input to an [`AnalysisPipeline`]. Per `specs/analysis.toml`, the
-/// canonical variants include a polars `DataFrame` and a
-/// `StorageQuery`; this minimal stand-in uses `Vec<Vec<f64>>` for the
-/// frame variant and omits the storage variant (the storage crate does
-/// not yet export a `StorageQuery` type).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Input to an [`AnalysisPipeline`]. Per `specs/analysis.toml`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum AnalysisInput {
     /// A telemetry range query: all readings on `subject_pattern`
     /// between `from` and `to`.
@@ -44,9 +39,10 @@ pub enum AnalysisInput {
         /// Subject pattern selecting which telemetry streams to read.
         subject_pattern: SubjectPattern,
     },
-    /// An in-memory rectangular frame: one row per record, one column
-    /// per feature.
-    DataFrame(Vec<Vec<f64>>),
+    /// A storage query to run against the L4 backend.
+    StorageQuery(StorageQuery),
+    /// An in-memory polars `DataFrame`.
+    DataFrame(DataFrame),
 }
 
 // ===========================================================================
@@ -66,31 +62,30 @@ pub struct AnalysisStats {
     pub generated_at: Timestamp,
 }
 
-/// Result of an analysis pipeline. Per `specs/analysis.toml`, the
-/// canonical shape is a polars `DataFrame` + a `FeatureSchema`; this
-/// minimal stand-in holds the frame as `Vec<Vec<f64>>` and omits the
-/// schema (re-exported from `themql-training` when polars is wired in).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Result of an analysis pipeline. Per `specs/analysis.toml`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnalysisResult {
-    /// The result frame.
-    pub frame: Vec<Vec<f64>>,
+    /// The result frame (polars `DataFrame`).
+    pub frame: DataFrame,
+    /// Feature schema describing the columns.
+    pub schema: FeatureSchema,
     /// Summary statistics.
     pub stats: AnalysisStats,
 }
 
 // ===========================================================================
-// Dataset (minimal local stand-in; same shape as themql-training::Dataset)
+// Dataset (polars-backed)
 // ===========================================================================
 
-/// Minimal dataset for `themql-training`. Defined locally because
-/// `themql-training::Dataset` holds polars frames in its canonical form;
-/// this stand-in uses `Vec<Vec<f64>>` until polars is wired in.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Dataset for `themql-training`. Per `specs/analysis.toml`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Dataset {
-    /// Feature matrix.
-    pub features: Vec<Vec<f64>>,
-    /// Label matrix.
-    pub labels: Vec<Vec<f64>>,
+    /// Feature matrix (polars `DataFrame`).
+    pub features: DataFrame,
+    /// Label matrix (polars `DataFrame`).
+    pub labels: DataFrame,
+    /// Feature schema.
+    pub feature_schema: FeatureSchema,
 }
 
 // ===========================================================================
@@ -125,6 +120,8 @@ pub struct DatasetBuilder {
     pub feature_columns: Vec<String>,
     /// Names of the columns to use as labels.
     pub label_columns: Vec<String>,
+    /// Normalisation to apply.
+    pub normalization: NormalizationSpec,
 }
 
 impl DatasetBuilder {
@@ -133,20 +130,41 @@ impl DatasetBuilder {
     /// # Errors
     /// Returns [`AnalysisError::SchemaMismatch`] if the builder's
     /// column selections cannot be satisfied by `result`.
-    pub fn build(&self, result: AnalysisResult) -> Result<Dataset, AnalysisError> {
-        let stats = result.stats;
-        let feature_cols = u32::try_from(self.feature_columns.len()).unwrap_or(u32::MAX);
-        if feature_cols > stats.columns {
-            return Err(AnalysisError::SchemaMismatch {
-                expected: format!("<= {} feature columns", stats.columns),
-                got: format!("{} feature columns", self.feature_columns.len()),
-            });
-        }
+    pub fn build(&self, result: &AnalysisResult) -> Result<Dataset, AnalysisError> {
+        let feature_frame = select_columns(&result.frame, &self.feature_columns)?;
+        let label_frame = select_columns(&result.frame, &self.label_columns)?;
+        let feature_schema = FeatureSchema {
+            features: self
+                .feature_columns
+                .iter()
+                .map(|name| FeatureSpec {
+                    name: name.clone(),
+                    dtype: FeatureDType::F64,
+                    shape: vec![],
+                })
+                .collect(),
+            normalization: self.normalization.clone(),
+        };
         Ok(Dataset {
-            features: result.frame,
-            labels: Vec::new(),
+            features: feature_frame,
+            labels: label_frame,
+            feature_schema,
         })
     }
+}
+
+/// Select columns from a `DataFrame` by name.
+fn select_columns(frame: &DataFrame, columns: &[String]) -> Result<DataFrame, AnalysisError> {
+    if columns.is_empty() {
+        return Ok(DataFrame::empty());
+    }
+    let col_names: Vec<&str> = columns.iter().map(String::as_str).collect();
+    frame
+        .select(&col_names)
+        .map_err(|e| AnalysisError::SchemaMismatch {
+            expected: format!("{columns:?}"),
+            got: e.to_string(),
+        })
 }
 
 // ===========================================================================
@@ -163,10 +181,7 @@ pub trait ThedafAdapter: Send + Sync {
     /// # Errors
     /// Returns [`AnalysisError::ThedafError`] on any legacy-store
     /// failure.
-    fn fetch_legacy(
-        &self,
-        query: &str,
-    ) -> impl Future<Output = Result<Vec<Vec<f64>>, AnalysisError>>;
+    fn fetch_legacy(&self, query: &str) -> impl Future<Output = Result<DataFrame, AnalysisError>>;
 
     /// List dataset names available in the legacy theDAF store.
     ///
@@ -181,10 +196,7 @@ pub trait ThedafAdapter: Send + Sync {
 // ===========================================================================
 
 /// Errors raised by analysis pipelines, dataset builders, or theDAF
-/// adapters. Mirrors `specs/analysis.toml [api.AnalysisError]`; the
-/// `StorageError` variant carries a `String` rather than a
-/// `themql-storage::StorageError` because that crate does not yet
-/// export that type.
+/// adapters. Per `specs/analysis.toml [api.AnalysisError]`.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AnalysisError {
     /// Polars operation failed.
@@ -209,6 +221,12 @@ pub enum AnalysisError {
     InternalError(String),
 }
 
+impl From<themql_storage::StorageError> for AnalysisError {
+    fn from(e: themql_storage::StorageError) -> Self {
+        AnalysisError::StorageError(e.to_string())
+    }
+}
+
 impl From<AnalysisError> for Error {
     fn from(e: AnalysisError) -> Self {
         let msg = e.to_string();
@@ -220,22 +238,6 @@ impl From<AnalysisError> for Error {
             | AnalysisError::InternalError(_) => Error::new(ErrorCode::ResolverError, msg),
         }
     }
-}
-
-// ===========================================================================
-// PolarsAnalysisResult — polars-backed analysis result
-// ===========================================================================
-
-/// Polars-backed analysis result. Wraps a `polars::frame::DataFrame`
-/// alongside summary [`AnalysisStats`]. Per `specs/analysis.toml`, polars
-/// is the semantic owner of dataframe operations; this type is the real
-/// backing for `AnalysisResult` once polars is wired in.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PolarsAnalysisResult {
-    /// The result frame owned by polars.
-    pub frame: DataFrame,
-    /// Summary statistics about `frame`.
-    pub stats: AnalysisStats,
 }
 
 // ===========================================================================
@@ -301,9 +303,9 @@ impl PolarsDatasetBuilder {
 // RayonAnalysisPipeline — parallel analysis pipeline
 // ===========================================================================
 
-/// Analysis pipeline that processes [`AnalysisInput::DataFrame`] inputs in
-/// parallel using rayon. Per `specs/analysis.toml [parallelism]`, rayon
-/// provides CPU-bound parallelism for analysis work.
+/// Analysis pipeline that processes inputs in parallel using rayon.
+/// Per `specs/analysis.toml [parallelism]`, rayon provides CPU-bound
+/// parallelism for analysis work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RayonAnalysisPipeline;
 
@@ -313,6 +315,62 @@ impl RayonAnalysisPipeline {
     pub fn new() -> Self {
         Self
     }
+
+    /// Count null/NaN values in a polars `DataFrame` using rayon.
+    fn count_nulls(frame: &DataFrame) -> u64 {
+        let mut count = 0u64;
+        for i in 0..frame.width() {
+            if let Some(col) = frame.columns().get(i) {
+                let series = col.as_materialized_series();
+                count += series.null_count() as u64;
+            }
+        }
+        count
+    }
+
+    /// Build a `FeatureSchema` from a polars `DataFrame`.
+    fn schema_from_frame(frame: &DataFrame) -> FeatureSchema {
+        let features: Vec<FeatureSpec> = frame
+            .columns()
+            .iter()
+            .map(|col| FeatureSpec {
+                name: col.name().to_string(),
+                dtype: FeatureDType::F64,
+                shape: vec![],
+            })
+            .collect();
+        FeatureSchema {
+            features,
+            normalization: NormalizationSpec::None,
+        }
+    }
+
+    /// Convert a `StorageResultSet` to a polars `DataFrame`.
+    fn storage_result_to_frame(rs: StorageResultSet) -> Result<DataFrame, AnalysisError> {
+        if rs.entries.is_empty() {
+            return Ok(DataFrame::empty());
+        }
+        let headers = vec!["key".to_string(), "value".to_string()];
+        let rows: Vec<Vec<f64>> = rs
+            .entries
+            .into_iter()
+            .map(|(k, v)| {
+                let key_len = usize_to_f64(k.as_str().len());
+                let val_len = usize_to_f64(v.bytes.len());
+                vec![key_len, val_len]
+            })
+            .collect();
+        let builder = PolarsDatasetBuilder::new(headers);
+        builder.build_from_rows(&["key".to_string(), "value".to_string()], &rows)
+    }
+}
+
+/// Lossy `usize` -> `f64` conversion for telemetry-size features. The
+/// values are bounded by small byte counts, so precision loss is not a
+/// concern in practice.
+#[allow(clippy::cast_precision_loss)]
+fn usize_to_f64(n: usize) -> f64 {
+    n as f64
 }
 
 impl AnalysisPipeline for RayonAnalysisPipeline {
@@ -322,27 +380,92 @@ impl AnalysisPipeline for RayonAnalysisPipeline {
         _ctx: &Context,
     ) -> impl Future<Output = Result<AnalysisResult, AnalysisError>> {
         let out = match input {
-            AnalysisInput::DataFrame(rows) => {
-                let columns = rows.first().map_or(0, std::vec::Vec::len);
-                let null_count = rows
-                    .par_iter()
-                    .map(|row| row.iter().filter(|v| v.is_nan()).count() as u64)
-                    .sum::<u64>();
+            AnalysisInput::DataFrame(frame) => {
+                let null_count = Self::count_nulls(frame);
+                let schema = Self::schema_from_frame(frame);
                 Ok(AnalysisResult {
-                    frame: rows.clone(),
+                    frame: frame.clone(),
+                    schema,
                     stats: AnalysisStats {
-                        rows: u64::try_from(rows.len()).unwrap_or(u64::MAX),
-                        columns: u32::try_from(columns).unwrap_or(u32::MAX),
+                        rows: u64::try_from(frame.height()).unwrap_or(u64::MAX),
+                        columns: u32::try_from(frame.width()).unwrap_or(u32::MAX),
                         null_count,
                         generated_at: Timestamp::now_monotonic(),
                     },
                 })
             }
             AnalysisInput::Telemetry { .. } => Err(AnalysisError::InternalError(
-                "telemetry storage queries are not yet implemented".to_owned(),
+                "telemetry queries require a storage backend; use StorageQuery variant".to_owned(),
+            )),
+            AnalysisInput::StorageQuery(_) => Err(AnalysisError::InternalError(
+                "storage queries require a storage backend; pass one to the pipeline".to_owned(),
             )),
         };
         std::future::ready(out)
+    }
+}
+
+/// Analysis pipeline with a storage backend. Extends
+/// [`RayonAnalysisPipeline`] with the ability to query storage.
+pub struct StorageAnalysisPipeline<S: Storage> {
+    /// The storage backend.
+    storage: S,
+}
+
+impl<S: Storage> StorageAnalysisPipeline<S> {
+    /// Construct a `StorageAnalysisPipeline` with the given storage.
+    #[must_use]
+    pub fn new(storage: S) -> Self {
+        Self { storage }
+    }
+}
+
+#[allow(async_fn_in_trait, clippy::manual_async_fn)]
+impl<S: Storage> AnalysisPipeline for StorageAnalysisPipeline<S> {
+    fn run(
+        &self,
+        input: &AnalysisInput,
+        _ctx: &Context,
+    ) -> impl Future<Output = Result<AnalysisResult, AnalysisError>> {
+        async move {
+            match input {
+                AnalysisInput::DataFrame(frame) => {
+                    let null_count = RayonAnalysisPipeline::count_nulls(frame);
+                    let schema = RayonAnalysisPipeline::schema_from_frame(frame);
+                    Ok(AnalysisResult {
+                        frame: frame.clone(),
+                        schema,
+                        stats: AnalysisStats {
+                            rows: u64::try_from(frame.height()).unwrap_or(u64::MAX),
+                            columns: u32::try_from(frame.width()).unwrap_or(u32::MAX),
+                            null_count,
+                            generated_at: Timestamp::now_monotonic(),
+                        },
+                    })
+                }
+                AnalysisInput::StorageQuery(q) => {
+                    let rs = self.storage.query(q).await?;
+                    let frame = RayonAnalysisPipeline::storage_result_to_frame(rs)?;
+                    let rows = u64::try_from(frame.height()).unwrap_or(u64::MAX);
+                    let columns = u32::try_from(frame.width()).unwrap_or(u32::MAX);
+                    let schema = RayonAnalysisPipeline::schema_from_frame(&frame);
+                    Ok(AnalysisResult {
+                        frame,
+                        schema,
+                        stats: AnalysisStats {
+                            rows,
+                            columns,
+                            null_count: 0,
+                            generated_at: Timestamp::now_monotonic(),
+                        },
+                    })
+                }
+                AnalysisInput::Telemetry { .. } => Err(AnalysisError::InternalError(
+                    "telemetry time-range queries require a storage backend with time indexing"
+                        .to_owned(),
+                )),
+            }
+        }
     }
 }
 
@@ -352,7 +475,11 @@ impl AnalysisPipeline for RayonAnalysisPipeline {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use rayon::prelude::*;
+    use themql_core::SubjectPattern;
+    use themql_storage::{StorageError, StorageKey};
 
     #[test]
     fn analysis_input_telemetry_variant() {
@@ -363,16 +490,27 @@ mod tests {
         };
         match inp {
             AnalysisInput::Telemetry { .. } => {}
-            AnalysisInput::DataFrame(_) => panic!("must be Telemetry variant"),
+            _ => panic!("must be Telemetry variant"),
+        }
+    }
+
+    #[test]
+    fn analysis_input_storage_query_variant() {
+        let q = StorageQuery::ByKey(StorageKey::new("test"));
+        let inp = AnalysisInput::StorageQuery(q);
+        match inp {
+            AnalysisInput::StorageQuery(_) => {}
+            _ => panic!("must be StorageQuery variant"),
         }
     }
 
     #[test]
     fn analysis_input_dataframe_variant() {
-        let inp = AnalysisInput::DataFrame(vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let frame = DataFrame::empty();
+        let inp = AnalysisInput::DataFrame(frame);
         match inp {
-            AnalysisInput::DataFrame(rows) => assert_eq!(rows.len(), 2),
-            AnalysisInput::Telemetry { .. } => panic!("must be DataFrame variant"),
+            AnalysisInput::DataFrame(_) => {}
+            _ => panic!("must be DataFrame variant"),
         }
     }
 
@@ -390,44 +528,10 @@ mod tests {
     }
 
     #[test]
-    fn dataset_builder_construction() {
-        let builder = DatasetBuilder {
-            feature_columns: vec!["x".to_owned(), "y".to_owned()],
-            label_columns: vec!["z".to_owned()],
-        };
-        let result = AnalysisResult {
-            frame: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
-            stats: AnalysisStats {
-                rows: 2,
-                columns: 2,
-                null_count: 0,
-                generated_at: Timestamp::now_monotonic(),
-            },
-        };
-        let ds = builder.build(result).unwrap();
-        assert_eq!(ds.features.len(), 2);
-        assert!(ds.labels.is_empty());
-    }
-
-    #[test]
-    fn dataset_builder_rejects_too_many_features() {
-        let builder = DatasetBuilder {
-            feature_columns: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-            label_columns: vec![],
-        };
-        let result = AnalysisResult {
-            frame: vec![vec![1.0, 2.0]],
-            stats: AnalysisStats {
-                rows: 1,
-                columns: 2,
-                null_count: 0,
-                generated_at: Timestamp::now_monotonic(),
-            },
-        };
-        assert!(matches!(
-            builder.build(result),
-            Err(AnalysisError::SchemaMismatch { .. })
-        ));
+    fn analysis_error_from_storage_error() {
+        let se = StorageError::NotFound;
+        let ae: AnalysisError = se.into();
+        assert!(matches!(ae, AnalysisError::StorageError(_)));
     }
 
     #[test]
@@ -452,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn rayon_parallel_sum_in_pipeline() {
+    fn rayon_parallel_sum() {
         let rows: Vec<Vec<f64>> = vec![
             vec![1.0, f64::NAN],
             vec![2.0, 0.0],
@@ -469,16 +573,130 @@ mod tests {
     }
 
     #[test]
-    fn rayon_analysis_pipeline_returns_ready_result() {
+    fn rayon_analysis_pipeline_dataframe() {
         let pipeline = RayonAnalysisPipeline::new();
-        let input = AnalysisInput::DataFrame(vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let builder = PolarsDatasetBuilder::new(vec!["x".to_owned(), "y".to_owned()]);
+        let frame = builder
+            .build_from_rows(
+                &["x".to_owned(), "y".to_owned()],
+                &[vec![1.0, 2.0], vec![3.0, 4.0]],
+            )
+            .expect("frame");
+        let input = AnalysisInput::DataFrame(frame);
         let ctx = Context::default();
-        let stats = AnalysisStats {
-            rows: 2,
-            columns: 2,
-            null_count: 0,
-            generated_at: Timestamp::now_monotonic(),
+        let result = futures_block_on(pipeline.run(&input, &ctx));
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.stats.rows, 2);
+        assert_eq!(result.stats.columns, 2);
+        assert_eq!(result.schema.features.len(), 2);
+    }
+
+    #[test]
+    fn dataset_builder_with_labels() {
+        let builder =
+            PolarsDatasetBuilder::new(vec!["x".to_owned(), "y".to_owned(), "z".to_owned()]);
+        let frame = builder
+            .build_from_rows(
+                &["x".to_owned(), "y".to_owned(), "z".to_owned()],
+                &[vec![1.0, 2.0, 3.0]],
+            )
+            .unwrap();
+        let result = AnalysisResult {
+            frame,
+            schema: FeatureSchema {
+                features: vec![
+                    FeatureSpec {
+                        name: "x".to_string(),
+                        dtype: FeatureDType::F64,
+                        shape: vec![],
+                    },
+                    FeatureSpec {
+                        name: "y".to_string(),
+                        dtype: FeatureDType::F64,
+                        shape: vec![],
+                    },
+                    FeatureSpec {
+                        name: "z".to_string(),
+                        dtype: FeatureDType::F64,
+                        shape: vec![],
+                    },
+                ],
+                normalization: NormalizationSpec::None,
+            },
+            stats: AnalysisStats {
+                rows: 1,
+                columns: 3,
+                null_count: 0,
+                generated_at: Timestamp::now_monotonic(),
+            },
         };
-        let _ = (&pipeline, &input, &ctx, stats);
+        let ds_builder = DatasetBuilder {
+            feature_columns: vec!["x".to_owned(), "y".to_owned()],
+            label_columns: vec!["z".to_owned()],
+            normalization: NormalizationSpec::None,
+        };
+        let ds = ds_builder.build(&result).unwrap();
+        assert_eq!(ds.features.width(), 2);
+        assert_eq!(ds.labels.width(), 1);
+        assert_eq!(ds.feature_schema.features.len(), 2);
+    }
+
+    #[test]
+    fn dataset_builder_rejects_missing_column() {
+        let builder = PolarsDatasetBuilder::new(vec!["x".to_owned()]);
+        let frame = builder
+            .build_from_rows(&["x".to_owned()], &[vec![1.0]])
+            .unwrap();
+        let result = AnalysisResult {
+            frame,
+            schema: FeatureSchema {
+                features: vec![FeatureSpec {
+                    name: "x".to_string(),
+                    dtype: FeatureDType::F64,
+                    shape: vec![],
+                }],
+                normalization: NormalizationSpec::None,
+            },
+            stats: AnalysisStats {
+                rows: 1,
+                columns: 1,
+                null_count: 0,
+                generated_at: Timestamp::now_monotonic(),
+            },
+        };
+        let ds_builder = DatasetBuilder {
+            feature_columns: vec!["x".to_owned()],
+            label_columns: vec!["missing".to_owned()],
+            normalization: NormalizationSpec::None,
+        };
+        assert!(ds_builder.build(&result).is_err());
+    }
+
+    #[tokio::test]
+    async fn storage_analysis_pipeline_storage_query() {
+        let storage = themql_storage::SledStorage::open_temp().unwrap();
+        let key = StorageKey::new("test.key");
+        storage
+            .put(
+                &key,
+                themql_storage::StorageValue::new(vec![1, 2, 3], themql_core::FormatTag::Json),
+            )
+            .await
+            .unwrap();
+        let pipeline = StorageAnalysisPipeline::new(storage);
+        let input = AnalysisInput::StorageQuery(StorageQuery::ByKey(key));
+        let ctx = Context::default();
+        let result = pipeline.run(&input, &ctx).await.unwrap();
+        assert_eq!(result.stats.rows, 1);
+        assert_eq!(result.stats.columns, 2);
+    }
+
+    fn futures_block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
     }
 }
