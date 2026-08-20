@@ -242,3 +242,9 @@ executed by the lead opencode agent directly; no subagents were spawned.
 
 - No subagents this turn. themql-sse Stage 8 implemented directly
   (real broadcast channel + axum serve_sse + Last-Event-ID replay).
+
+## 2026-08-20 (Phase 6)
+
+- No subagents this turn. All 4 steps (per-request authz, dependabot
+  remediation + lru dedup, real sensor drivers, embedded MQTT)
+  implemented directly. Single PR (#8), 4 commits.

@@ -181,21 +181,26 @@ quaternion); `ndarray` is retained only for raw ML-side array buffers.
 Cross-crate deps use `workspace = true` path deps declared in the root
 `Cargo.toml [workspace.dependencies]` (e.g. `themql-message.workspace = true`).
 
-## Repo state (v0.1, 2026-08-20, Phase 5 complete)
+## Repo state (v0.1, 2026-08-20, Phase 6 complete)
 
 - 20 crates (18 libs + 2 binaries), all with real `src/` content.
 - 21 specs (20 original + `specs/auth.toml`).
-- 341 tests pass workspace-wide (default features).
+- 365 tests pass workspace-wide (default features).
 - Full validation green: `cargo fmt --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny
-  check`, `cargo machete --with-metadata`, `scripts/ci_guard.py`.
+  --all-targets -- -D warnings`, `cargo test --workspace` (365),
+  `cargo deny check`, `cargo machete --with-metadata`,
+  `scripts/ci_guard.py`, TOML sanity, `cargo metadata`.
 - `themql-gnc` + `themql-estimation` compile `no_std` + `alloc`
   (`--no-default-features`).
 - Embedded binary cross-compiles for `thumbv7em-none-eabihf` with real
   EKF + HybridController pipeline (embassy tasks, `embedded-alloc`
-  global allocator).
-- GraphQL field-level authz via `RoleGuard` (Admin/Operator/Observer).
+  global allocator), real sensor drivers (BME280/LSM6DS3/NEO-6M over
+  embedded-hal 1.0), and minimq MQTT v5 telemetry payload formatting.
+- GraphQL per-request role extraction via better-auth sessions
+  (`RoleGuard` sees the actual caller role, not a global default).
 - MQTT topic ACLs via `MqttAcl` / `AclRule` (pattern matching).
+- `lru` deduped to 0.18.2; 6 dependabot advisories ignored as
+  non-exploitable (see `SECURITY.md` for rationale table).
 - CI: 9 jobs (fmt, check, clippy, test, toml-sanity, ci-guard, deny,
   machete, embedded-check).
 - `opencode.json` present with permissions + validate/safety-gate commands.

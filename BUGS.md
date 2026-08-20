@@ -165,3 +165,21 @@ safety-critical tooling installed. 305 tests pass workspace-wide
   L1/L3 use cases. (Phase 3 replaced valkey with `redis` for L3 and
   cachelito with `lru` for L1; `valkey` and `cachelito` are no longer in
   the cache crate's Cargo.toml.)
+
+## Phase 6 known issues (2026-08-20)
+
+- **WS subscription role extraction**: The authed GraphQL WS upgrade
+  handler currently defaults to `Observer` role at upgrade time without
+  resolving the session from the cookie (the `resolve_role_from_headers`
+  call is present but the session may not be available at WS upgrade
+  time). Refining to per-connection session resolution is a follow-up.
+- **Embedded MQTT transport**: `minimq` is wired and payload formatting
+  is live, but the actual TCP transport (`embassy-net`) is not yet
+  connected. The telemetry task formats payloads but does not publish
+  them over the network. Requires a specific MCU HAL commit.
+- **GitHub dependabot alerts**: 6 alerts remain open in the GitHub UI.
+  They are ignored in `deny.toml` with non-exploitability rationale
+  (see `SECURITY.md`), but dependabot does not read `deny.toml`. Manual
+  dismissal in the GitHub Security tab is required.
+- **lru duplicate-version warning**: Resolved by bumping themql-cache
+  from lru 0.12.5 to 0.18.2 (deduped with ratatui's transitive 0.18.2).
