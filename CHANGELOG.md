@@ -5,6 +5,22 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 2 Stage 12: final validation + commit + PR
+
+Ran the complete validation suite (all 7 gates green), updated all 8
+living docs to mark Stages 1-12 complete, committed all Phase 2 work
+as `d97fcca` (48 files, +6441/-960), pushed to
+`feat/phase-2-heavy-dep-wiring`, created PR #4.
+
+- `cargo fmt --check` — PASS
+- `cargo clippy --workspace --all-targets -- -D warnings` — PASS
+- `cargo test --workspace` — PASS (240 tests, 0 failures)
+- `cargo deny check` — PASS
+- `cargo machete --with-metadata` — PASS
+- `scripts/ci_guard.py` — PASS
+- `cargo metadata --no-deps` — PASS
+- `tch-backend` feature `cargo check` — PASS (tests not run, RAM)
+
 ### 2026-08-20 — Phase 2 Stage 11: safety-critical tooling + opencode.json + CI guard
 
 Installed and ran the safety-critical validation tooling per

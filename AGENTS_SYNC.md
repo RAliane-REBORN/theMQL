@@ -21,6 +21,11 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ### 2026-08-20 — no subagents this turn
 
+Phase 2 Stage 12 (final validation + commit + PR) was executed by the
+lead opencode agent directly; no subagents were spawned.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
 Phase 2 Stage 11 (safety-critical tooling + opencode.json + CI guard)
 was executed by the lead opencode agent directly; no subagents were
 spawned.

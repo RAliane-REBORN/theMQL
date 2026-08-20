@@ -140,7 +140,7 @@ Before a change touches anything in `themql-transport`, `themql-graphql`,
 - Does it introduce unbounded channels or blocking work on the async
   executor? (must not)
 
-## Known limitations (as of v0.1, 2026-08-20, Phase 2 Stages 1-11 complete)
+## Known limitations (as of v0.1, 2026-08-20, Phase 2 Stages 1-12 complete)
 
 All 20 crates now have real `src/` content (traits + types + error types +
 unit tests). The four safety-critical crates (themql-gnc, themql-estimation,

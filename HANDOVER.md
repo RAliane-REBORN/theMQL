@@ -4,11 +4,11 @@ Handover notes for the next agent/session. Fold in-flight items from
 `SESSION.md` here when a session ends. Update after every turn (see
 `MEMORY.md` standing rules).
 
-## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 2 Stage 11 complete)
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 2 Stage 12 complete)
 
 ### Repository state at handover
 
-- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-11
+- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-12
   complete: cache/storage backends, transport adapters, runtime impls,
   desktop/embedded binary wiring, analysis/training/inference heavy-dep
   wiring, cross-crate type reconciliation, safety-critical tooling,
@@ -19,11 +19,15 @@ Handover notes for the next agent/session. Fold in-flight items from
   warnings`, `cargo test --workspace`, `cargo deny check`,
   `cargo machete --with-metadata`, `scripts/ci_guard.py` all green.
 - BUG-0007 resolved (no open bugs).
-- Working tree has uncommitted changes. The user has not requested
-  commits.
+- Commit `d97fcca` pushed to `feat/phase-2-heavy-dep-wiring`, PR #4 open.
+- Working tree clean.
 
 ### What is done this turn
 
+- **Stage 12 — final validation + commit + PR**: ran full validation
+  suite (all 7 gates green), updated all 8 living docs for Stage 12
+  completion, committed all Phase 2 work as `d97fcca` (48 files, +6441/-
+  960), pushed to `feat/phase-2-heavy-dep-wiring`, created PR #4.
 - **Stage 11a — safety-critical tooling**: installed cargo-deny,
   cargo-machete, cargo-bloat. `cargo deny check` passes (added BSL-1.0
   + CDLA-Permissive-2.0 to deny.toml). `cargo machete` clean (removed

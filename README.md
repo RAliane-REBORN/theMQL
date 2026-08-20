@@ -100,7 +100,7 @@ historical artifacts. After every turn, the agent updates them (see
 
 ## Status
 
-v0.1 specification drop + Phase 1 complete + Phase 2 Stages 1-11
+v0.1 specification drop + Phase 1 complete + Phase 2 Stages 1-12
 complete. Workspace skeleton, deep specs, toolchain config, real `src/`
 content for ALL 20 crates, cache/storage/transport backends, runtime
 impls, desktop/embedded binary wiring, analysis/training/inference

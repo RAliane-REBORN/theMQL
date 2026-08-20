@@ -68,7 +68,7 @@ deliberate, not an oversight.
 
 - Name: theMQL (The Message Query Language)
 - Version: 0.1.0
-- Status: greenfield (Phase 2 Stages 1-11 complete — cache/storage/transport backends, runtime impls, desktop/embedded binary wiring, analysis/training/inference heavy-dep wiring, cross-crate type reconciliation, safety-critical tooling + opencode.json + CI guard)
+- Status: greenfield (Phase 2 Stages 1-12 complete — cache/storage/transport backends, runtime impls, desktop/embedded binary wiring, analysis/training/inference heavy-dep wiring, cross-crate type reconciliation, safety-critical tooling, opencode.json, CI guard, final validation + commit + PR #4)
 - Language: Rust
 - License: MIT
 - Repository: https://github.com/Metis-Avionics/theMQL
@@ -305,7 +305,7 @@ on theDAF. the embedded binary must not depend on theDAF.
 
 ### Validation baseline
 
-At end of 2026-08-20 (Phase 2 Stage 11 complete):
+At end of 2026-08-20 (Phase 2 Stage 12 complete):
 
 - 44+ TOML files parse via `python3 tomllib` + `scripts/ci_guard.py`.
 - `cargo metadata --no-deps --format-version 1` resolves.
@@ -321,7 +321,7 @@ At end of 2026-08-20 (Phase 2 Stage 11 complete):
 - The `tch-backend` feature in themql-training/themql-inference compiles
   clean; tests not run (libtorch + RAM constraints).
 
-### Phase 2 status: Stages 1-11 COMPLETE
+### Phase 2 status: Stages 1-12 COMPLETE
 
 All 20 crates have real `src/` content (traits + types + error types +
 unit tests) + real backends/impls wired behind the trait surfaces
@@ -345,4 +345,3 @@ script in place. Follow-ups (not blockers):
 - Real training loop in TchTrainer, real model loading in
   TchInferenceEngine, real analysis pipelines in RayonAnalysisPipeline.
 - Install mold + sccache for faster builds.
-- Stage 12: final validation + docs + PR.

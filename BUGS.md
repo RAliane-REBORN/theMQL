@@ -56,7 +56,7 @@ line + date + commit/PR reference when fixed.
 ## Known limitations (not bugs, but tracked alongside)
 
 These are spec-acknowledged gaps / v0.1 placeholders, not bugs. Phase 2
-Stages 1-11 are complete: all 20 crates have real `src/` content,
+Stages 1-12 are complete: all 20 crates have real `src/` content,
 cache/storage/transport backends wired, runtime impls + desktop/embedded
 binary wiring, analysis/training/inference heavy-dep wiring, cross-crate
 type reconciliation, and safety-critical tooling installed. 240 tests

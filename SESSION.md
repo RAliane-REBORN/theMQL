@@ -49,7 +49,7 @@ check`, `cargo machete --with-metadata`, `ci_guard.py` all green. No
 ## State of the repository
 
 - Phase 1 complete (spec + 19 crates implemented).
-- Phase 2 Stages 1-11 complete: cache/storage backends, transport
+- Phase 2 Stages 1-12 complete: cache/storage backends, transport
   adapters, runtime impls, desktop/embedded binary wiring,
   analysis/training/inference heavy-dep wiring, cross-crate type
   reconciliation, safety-critical tooling + opencode.json + CI guard.
@@ -61,19 +61,19 @@ check`, `cargo machete --with-metadata`, `ci_guard.py` all green. No
 
 ## In-flight work
 
-None. Phase 2 Stages 2-5 + 9 + 10 + 11 are complete.
+None. Phase 2 Stages 1-12 are complete. Commit `d97fcca` pushed to
+`feat/phase-2-heavy-dep-wiring`, PR #4 open.
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. Commit the work (user has not requested commits yet).
-2. Stage 12 — final validation + docs + PR.
-3. Implement full nonlinear quaternion EKF dynamics + Jacobian-based
+1. Merge PR #4 (awaiting review).
+2. Implement full nonlinear quaternion EKF dynamics + Jacobian-based
    Kalman gain in themql-estimation.
-4. Wire a real SHA-256 (or BLAKE3) into themql-artifact's
+3. Wire a real SHA-256 (or BLAKE3) into themql-artifact's
    HashValidator.
-5. Run `tch-backend` feature tests once a beefier environment is
+4. Run `tch-backend` feature tests once a beefier environment is
    available.
-6. Real cachelito L1, real valkey L3, real helix-db L4, key→subject
+5. Real cachelito L1, real valkey L3, real helix-db L4, key→subject
    index for pattern invalidation.
 
 ## Open questions / blockers
