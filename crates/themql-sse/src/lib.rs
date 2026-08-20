@@ -432,10 +432,14 @@ pub struct SseAppState {
 /// the server first replays all retained events whose `id` is greater
 /// than the header value, then continues with the live stream.
 pub fn serve_sse(publisher: TokioSsePublisher, subject: Subject) -> Router {
-    let state = SseAppState {
-        publisher: Arc::new(publisher),
-        subject,
-    };
+    serve_sse_with_publisher(Arc::new(publisher), subject)
+}
+
+/// Like [`serve_sse`] but accepts an already-shared [`Arc<TokioSsePublisher>`].
+/// Callers that need to publish to the same publisher from outside the
+/// HTTP handler (e.g. an MQTT-to-SSE bridge) should use this variant.
+pub fn serve_sse_with_publisher(publisher: Arc<TokioSsePublisher>, subject: Subject) -> Router {
+    let state = SseAppState { publisher, subject };
     Router::new()
         .route("/events", get(events_handler))
         .with_state(state)

@@ -17,6 +17,7 @@ themql-artifact.workspace = true
 themql-storage.workspace = true
 themql-schema.workspace = true
 themql-training = { workspace = true, optional = true }
+themql-mqtt.workspace = true
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "signal"] }
 ratatui = { workspace = true }
