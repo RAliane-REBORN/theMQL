@@ -5613,10 +5613,14 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embedded-alloc",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-io-async",
  "nalgebra",
  "static_cell",
  "themql-estimation",
  "themql-gnc",
+ "tokio",
 ]
 
 [[package]]

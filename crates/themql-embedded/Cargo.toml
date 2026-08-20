@@ -19,6 +19,14 @@ themql-gnc = { path = "../themql-gnc", default-features = false }
 themql-estimation = { path = "../themql-estimation", default-features = false }
 nalgebra = { version = "0.35", default-features = false, features = ["libm"] }
 
+[dependencies]
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+embedded-io-async = "0.7"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
 [package.metadata.cargo-machete]
 ignored = ["cortex-m-rt"]
 
