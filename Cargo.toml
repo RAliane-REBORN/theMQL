@@ -80,7 +80,7 @@ sled = "0.34"
 # Embedded
 heapless = "0.8"
 cortex-m-rt = "0.7"
-alloc-cortex-m = "0.4"
+embedded-alloc = "0.7"
 static_cell = "2"
 
 # HTTP / MQTT

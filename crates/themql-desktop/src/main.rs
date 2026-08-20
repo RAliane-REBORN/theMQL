@@ -337,7 +337,6 @@ async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
         if let (Some(u), Some(p)) = (&args.mqtt_username, &args.mqtt_password) {
             mqtt_config = mqtt_config.with_credentials(u, p);
             let acl = match u.as_str() {
-                "admin" => themql_mqtt::admin_acl(),
                 "operator" => themql_mqtt::operator_acl(),
                 "observer" => themql_mqtt::observer_acl(),
                 _ => themql_mqtt::admin_acl(),

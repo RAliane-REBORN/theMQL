@@ -349,7 +349,7 @@ fn estimator_to_gnc_state(est: &themql_estimation::EstimatorState) -> themql_gnc
 
 #[cfg(target_os = "none")]
 mod embedded {
-    use alloc_cortex_m::CortexMHeap;
+    use embedded_alloc::TlsfHeap as Heap;
     use embassy_executor::Spawner;
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::channel::Channel;
@@ -357,7 +357,7 @@ mod embedded {
     use static_cell::StaticCell;
 
     use themql_estimation::{
-        BarometerReading, Estimator, EstimatorState, Ekf, GpsReading, ImuReading,
+        BarometerReading, Ekf, Estimator, EstimatorState, GpsReading, ImuReading,
     };
     use themql_gnc::{
         Controller, HybridController, HybridSwitchingPolicy, LqriController, LqriMatrices,
@@ -372,7 +372,7 @@ mod embedded {
 
     /// Global allocator for `no_std` + `alloc` on Cortex-M.
     #[global_allocator]
-    static ALLOC: CortexMHeap = CortexMHeap::empty();
+    static ALLOC: Heap = Heap::empty();
 
     /// Channel: GPS driver → estimator.
     static GPS_CHAN: Channel<CriticalSectionRawMutex, TaggedReading, 8> = Channel::new();
@@ -895,8 +895,10 @@ mod tests {
     #[test]
     fn full_ekf_to_controller_pipeline() {
         use themql_estimation::{Ekf, Estimator, ImuReading};
-        use themql_gnc::{Controller, HybridController, HybridSwitchingPolicy, LqriController,
-            LqriMatrices, PidController, PidGains, Setpoint};
+        use themql_gnc::{
+            Controller, HybridController, HybridSwitchingPolicy, LqriController, LqriMatrices,
+            PidController, PidGains, Setpoint,
+        };
         let mut ekf = Ekf::new();
         let imu = ImuReading {
             accel: [0.1, 0.0, 0.0],
@@ -915,11 +917,7 @@ mod tests {
             Q: nalgebra::SMatrix::identity(),
             R: nalgebra::SMatrix::identity(),
         });
-        let controller = HybridController::new(
-            HybridSwitchingPolicy::AlwaysPid,
-            pid,
-            lqri,
-        );
+        let controller = HybridController::new(HybridSwitchingPolicy::AlwaysPid, pid, lqri);
         let setpoint = Setpoint::new();
         let cmd = controller.step(&gnc_state, &setpoint, 0.01).expect("step");
         for v in cmd.values {

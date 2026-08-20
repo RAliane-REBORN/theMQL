@@ -278,13 +278,17 @@ impl AuthRole {
     /// (admin > operator > observer).
     #[must_use]
     pub fn satisfies(self, required: AuthRole) -> bool {
-        match (self, required) {
-            (AuthRole::Admin, _) => true,
-            (AuthRole::Operator, AuthRole::Admin) => false,
-            (AuthRole::Operator, _) => true,
-            (AuthRole::Observer, AuthRole::Observer) => true,
-            (AuthRole::Observer, _) => false,
+        if self == AuthRole::Admin {
+            return true;
         }
+        if matches!(
+            (self, required),
+            (AuthRole::Operator, AuthRole::Operator | AuthRole::Observer)
+                | (AuthRole::Observer, AuthRole::Observer)
+        ) {
+            return true;
+        }
+        false
     }
 }
 

@@ -240,12 +240,11 @@ impl AclRule {
     /// Check if this rule permits the given action on the given topic.
     #[must_use]
     pub fn permits(&self, action: AclAction, topic: &str) -> bool {
-        let action_ok = match (self.action, action) {
-            (AclAction::PubSub, _) => true,
-            (AclAction::Publish, AclAction::Publish) => true,
-            (AclAction::Subscribe, AclAction::Subscribe) => true,
-            _ => false,
-        };
+        let action_ok = matches!(
+            (self.action, action),
+            (AclAction::PubSub, _) | (AclAction::Publish, AclAction::Publish)
+                | (AclAction::Subscribe, AclAction::Subscribe)
+        );
         action_ok && self.topic_matches(topic)
     }
 }
@@ -955,8 +954,16 @@ mod tests {
         let acl = observer_acl();
         let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1").with_acl(acl);
         assert!(cfg.acl.is_some());
-        assert!(cfg.acl.as_ref().unwrap().permits(AclAction::Subscribe, "vehicle.events"));
-        assert!(!cfg.acl.as_ref().unwrap().permits(AclAction::Publish, "vehicle.events"));
+        assert!(cfg
+            .acl
+            .as_ref()
+            .unwrap()
+            .permits(AclAction::Subscribe, "vehicle.events"));
+        assert!(!cfg
+            .acl
+            .as_ref()
+            .unwrap()
+            .permits(AclAction::Publish, "vehicle.events"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ embassy-executor = { workspace = true, features = ["platform-cortex-m", "executo
 embassy-sync.workspace = true
 embassy-time.workspace = true
 cortex-m-rt.workspace = true
-alloc-cortex-m.workspace = true
+embedded-alloc.workspace = true
 static_cell.workspace = true
 themql-gnc = { path = "../themql-gnc", default-features = false }
 themql-estimation = { path = "../themql-estimation", default-features = false }
