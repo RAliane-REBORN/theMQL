@@ -19,6 +19,15 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 5 complete)
+
+Phase 5 (no_std GNC/estimation + embedded EKF/controller + authz, 3
+steps) executed by the lead opencode agent directly; no subagents were
+spawned. All 3 steps complete: themql-gnc + themql-estimation compile
+no_std+alloc, embedded binary runs real EKF + HybridController pipeline,
+GraphQL field guards + MQTT topic ACLs implemented. 341 tests pass
+workspace-wide.
+
 ### 2026-08-20 — no subagents this turn (Phase 4 complete)
 
 Phase 4 (MQTT bridge + auth + embedded embassy main, 4 steps) executed

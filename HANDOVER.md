@@ -4,21 +4,23 @@ Handover notes for the next agent/session. Fold in-flight items from
 `SESSION.md` here when a session ends. Update after every turn (see
 `MEMORY.md` standing rules).
 
-## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 4 complete — MQTT bridge + auth + embedded embassy)
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 5 complete — no_std GNC/estimation + embedded EKF/controller + authz)
 
 ### Repository state at handover
 
 - Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-12
   complete. Phase 3 Stages 1-11 complete. Phase 3 followups complete
-  (PR #5 merged to main). **Phase 4 complete**: MQTT-to-SSE bridge,
-  better-auth GraphQL auth, MQTT broker credentials, real embassy
-  embedded main.
-- Branch: `feat/phase-4-mqtt-auth-embedded` (PR #6 pending).
-- 325 tests pass workspace-wide (default features). 20 crates, 21 specs.
+  (PR #5 merged). Phase 4 complete (PR #6 merged). **Phase 5 complete**:
+  no_std gnc/estimation, real EKF+HybridController in embedded binary,
+  GraphQL authz guards + MQTT topic ACLs.
+- Branch: `feat/phase-5-no_std-authz` (PR pending).
+- 341 tests pass workspace-wide (default features). 20 crates, 21 specs.
 - Full validation green: `cargo fmt --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo test --workspace` (325),
-  `cargo machete --with-metadata`, `scripts/ci_guard.py`, TOML sanity.
-- `cargo check --target thumbv7em-none-eabihf` green (embedded binary).
+  --all-targets -- -D warnings`, `cargo test --workspace` (341),
+  `cargo deny check`, `cargo machete --with-metadata`,
+  `scripts/ci_guard.py`, TOML sanity, `cargo metadata`.
+- `cargo build -p themql-embedded --target thumbv7em-none-eabihf` green
+  (embedded binary with real EKF + HybridController).
 - CI: 9 jobs (fmt, check, clippy, test, toml-sanity, ci-guard, deny,
   machete, embedded-check).
 - `tch-backend` feature compiles clean (tests not run: libtorch + RAM).
@@ -26,7 +28,7 @@ Handover notes for the next agent/session. Fold in-flight items from
 
 ### What is done this turn
 
-Phase 4 — 4 steps:
+Phase 5 — 3 steps:
 
 1. **Step 1**: Removed unused `serde_json` dev-dep from themql-analysis
    (machete fix). PR #5 merged to main.

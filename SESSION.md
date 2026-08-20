@@ -9,109 +9,83 @@ standing rules). When a session ends, fold the in-flight items into
 - Date: 2026-08-20
 - Mode: build
 - Agent: opencode (glm-5.2:cloud)
-- Branch: `feat/phase-4-mqtt-auth-embedded` (off main, post PR #5 merge)
+- Branch: `feat/phase-5-no_std-authz` (off main, post PR #6 merge)
 
 ## Just-completed turn
 
-Phase 4 — MQTT bridge, auth, and embedded embassy main (4 steps):
+Phase 5 — no_std GNC/estimation, embedded EKF+controller wiring, authz (3 steps):
 
-1. **Step 1 — Fix machete + merge PR #5**: Removed unused `serde_json`
-   dev-dep from `themql-analysis`. Pushed, CI green (all 8 jobs), merged
-   PR #5 to main (`983e529`). Created `feat/phase-4-mqtt-auth-embedded`.
-2. **Step 2 — Wire MQTT bridge into serve**: Added `themql-mqtt` dep to
-   `themql-desktop`. `MqttToSseBridge` (MessageHandler) re-publishes
-   incoming MQTT messages to the SSE publisher via `broadcast()`.
-   `--enable-mqtt`, `--mqtt-host`, `--mqtt-port`, `--mqtt-client-id`
-   CLI args. Background tokio task drives rumqttc event loop.
-   `serve_sse_with_publisher` variant added to themql-sse for shared
-   `Arc<TokioSsePublisher>`. +3 tests.
-3. **Step 3 — Auth via better-auth + MQTT creds**: Created
-   `specs/auth.toml` (authn: GraphQL sessions via better-auth, MQTT
-   username/password; authz: role-based ACLs). Added `better-auth` 0.10
-   (axum + rustls) to workspace deps. `RumqttcConfig` gains
-   `username`/`password` fields + `with_credentials()` builder.
-   `--enable-auth` + `--auth-secret` (or `THEMQL_AUTH_SECRET` env var)
-   wires `BetterAuth` with `MemoryDatabaseAdapter` +
-   `EmailPasswordPlugin` into the serve router. `--mqtt-username`/
-   `--mqtt-password` for broker authn. +5 tests.
-4. **Step 4 — Real embassy embedded main**: `#![no_std]` +
-   `#![no_main]` via `cfg_attr(target_os = "none")`. Embassy executor
-   with `platform-cortex-m` + `executor-thread`. 7 embassy tasks per
-   spec: gps (10Hz), baro (50Hz), imu (200Hz), estimator (200Hz),
-   telemetry (10Hz), inference (5Hz), command. Inter-task channels via
-   `embassy_sync::channel::Channel<CriticalSectionRawMutex>`.
-   `HeapString` fixed-capacity (64B) string for no_std error messages.
-   Panic handler with spin_loop. Host stub retained for x86 tests.
-   Cross-compiles clean: `cargo check --target thumbv7em-none-eabihf`.
-   New CI job: `embedded-check`. +7 tests.
+1. **Step 1 — no_std migration of themql-gnc + themql-estimation**: Both
+   crates now compile with `--no-default-features` (no_std + alloc).
+   `default = ["std"]` feature gates `themql-core` + `thiserror/std`.
+   `nalgebra` with `default-features = false` + `libm` for float
+   transcendentals. `num-traits` with `libm` for `Real` trait
+   (estimation, no_std mode only). `extern crate alloc;` +
+   `use alloc::string::String / vec::Vec`. `core::fmt` / `core::ptr`
+   instead of `std::fmt` / `std::ptr`. `#[cfg(feature = "std")]` gate on
+   `From<Error> for themql_core::Error`. Tests pass in both modes.
 
-**Totals**: 325 tests pass workspace-wide (was 306 at start of turn).
-Full validation green: fmt, clippy, test, machete, TOML sanity, ci_guard.
-   returns error). 15 tests total in themql-graphql (was 13).
-3. **Workstream D — GitHub Actions CI**: created
-   `.github/workflows/ci.yml` with 8 jobs: fmt, check, clippy, test,
-   toml-sanity, ci-guard, deny, machete. Uses `dtolnay/rust-toolchain`
-   + `Swatinem/rust-cache`. `tch-backend` explicitly skipped (libtorch
-   too heavy for free runners). Runs on push to `feat/*` + PRs to
-   `main`.
-4. **Workstream C — real themql-desktop subcommands**: rewrote all 5
-   subcommand bodies:
-   - `serve`: builds GraphQL schema (`GraphqlSchemaImpl` with real
-     resolver bridge + dispatch bridge + subscription source) + SSE
-     server (`serve_sse`), merges axum routers, binds TCP, runs with
-     graceful shutdown (Ctrl-C).
-   - `analyze`: reads JSON data file, builds `PolarsDatasetBuilder`,
-     runs `RayonAnalysisPipeline`, prints stats.
-   - `train`: behind `tch-backend` feature — loads dataset, builds
-     `TrainingConfig`, runs `TchTrainer::train`, packages via
-     `BincodeArtifactWriter`, writes to file. Without feature: returns
-     error with instructions.
-   - `validate`: loads `ModelArtifact` via `FileArtifactLoader`, prints
-     format/schema_version/bytes/hash.
-   - `telemetry`: opens `SledStorage`, queries by subject pattern,
-     prints entries.
-   - Added `tch-backend` feature to themql-desktop Cargo.toml (optional
-     dep on `themql-training`). 12 tests (was 13 — removed TUI test
-     that requires a terminal).
+2. **Step 2 — Wire real EKF + HybridController into embedded binary**:
+   The embedded binary now runs the full GNC pipeline on thumbv7em.
+   Global allocator (`embedded-alloc::TlsfHeap`, 16KB heap) for alloc
+   usage. `estimator_task`: real EKF predict (IMU) + update (GPS/baro).
+   `controller_task`: real `HybridController` consuming
+   `EstimatorState`. `estimator_to_gnc_state` free function maps 21-dim
+   state to `GncState`. `EST_CHAN`: estimator→controller channel.
+   Sensor decode functions (stub drivers → zero readings). Single
+   `unsafe` block in `main()` for allocator init (justified in TETANUS
+   docs). `forbid(unsafe_code)` → `deny(unsafe_code)` with local allow.
+   +3 host tests (19 total).
 
-Validation: 306 tests pass workspace-wide (default features). `cargo
-fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo deny check`, `cargo machete --with-metadata`,
-`scripts/ci_guard.py` — all green. Removed unused deps: `serde` from
-themql-graphql, `serde_json` from themql-analysis (moved to dev-deps),
-`tempfile` from themql-desktop dev-deps.
+3. **Step 3 — GraphQL authz + MQTT ACLs**: `AuthRole` enum (Admin,
+   Operator, Observer) with hierarchy. `RoleGuard` implementing
+   `async_graphql::Guard`. QueryRoot fields guarded with Observer,
+   MutationRoot with Operator, SubscriptionRoot with Observer.
+   `GraphqlSchemaImpl::with_role()` injects role as global data. MQTT
+   `AclAction` / `AclRule` / `MqttAcl` with topic pattern matching
+   (`*` wildcard). `admin_acl`/`operator_acl`/`observer_acl` presets.
+   `RumqttcConfig.with_acl()` + `RumqttcTransport` checks ACL before
+   publish/subscribe. Desktop: `serve()` uses `with_role(Admin)`, MQTT
+   username → ACL mapping. +17 authz tests across crates.
+
+**Totals**: 341 tests pass workspace-wide (was 325). Full validation
+green: fmt, check, clippy, test, deny, machete, embedded-check,
+toml-sanity, ci-guard.
 
 ## State of the repository
 
 - Phase 1 complete (spec + 20 crates implemented).
 - Phase 2 Stages 1-12 complete.
 - Phase 3 Stages 1-11 complete.
-- Phase 3 followups complete: real GraphQL subscriptions, GitHub
-  Actions CI, real themql-desktop subcommands. PR #5 merged to main.
-- Phase 4 complete: MQTT-to-SSE bridge in serve, better-auth GraphQL
-  auth + MQTT broker credentials, real embassy embedded main.
-- 325 tests pass workspace-wide (default features). 20 crates, 21 specs.
+- Phase 3 followups complete (PR #5 merged).
+- Phase 4 complete (PR #6 merged): MQTT-to-SSE bridge, better-auth,
+  embassy embedded main.
+- Phase 5 complete: no_std gnc/estimation, real EKF+controller in
+  embedded binary, GraphQL authz guards + MQTT topic ACLs.
+- 341 tests pass workspace-wide (default features). 20 crates, 21 specs.
 - Full validation green.
 - `tch-backend` feature compiles clean (tests not run: libtorch OOM).
-- Embedded binary cross-compiles for thumbv7em-none-eabihf.
+- Embedded binary cross-compiles for thumbv7em-none-eabihf with real
+  EKF + HybridController.
 - No open bugs.
 
 ## In-flight work
 
-None. Phase 4 is complete. Changes are committed on
-`feat/phase-4-mqtt-auth-embedded` branch, ready to push and open PR #6.
+None. Phase 5 is complete. Changes are committed on
+`feat/phase-5-no_std-authz` branch, ready to push and open PR.
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. Merge PR #6 to main after CI green.
+1. Merge Phase 5 PR to main after CI green.
 2. Run `tch-backend` feature tests once a beefier environment is
    available (>7.8GB RAM).
-3. Make themql-gnc/themql-estimation no_std compatible so the embedded
-   binary can call real EKF + HybridController (currently embassy tasks
-   stub the GNC/estimation logic).
-4. GraphQL field-level authz (subject-pattern ACLs per role).
-5. MQTT topic filter ACLs per client id.
-6. Fuzzing harness + secret-management policy.
+3. Per-request role extraction from better-auth sessions (currently
+   uses default Admin role; middleware to extract role from JWT
+   session and inject per-request).
+4. Fuzzing harness + secret-management policy.
+5. Real sensor drivers (I2C/SPI/UART) for embedded binary.
+6. MQTT publish path in embedded binary (currently telemetry task
+   counts cycles only).
 
 ## Open questions / blockers
 

@@ -68,13 +68,13 @@ deliberate, not an oversight.
 
 - Name: theMQL (The Message Query Language)
 - Version: 0.1.0
-- Status: greenfield (Phase 4 complete — Phase 3 Stages 1-11 + Phase 3 followups + Phase 4: MQTT-to-SSE bridge in serve, better-auth GraphQL auth + MQTT broker credentials, real embassy embedded main with 7 tasks cross-compiling for thumbv7em-none-eabihf)
+- Status: greenfield (Phase 5 complete — no_std gnc/estimation, real EKF+HybridController in embedded binary, GraphQL authz guards + MQTT topic ACLs)
 - Language: Rust
 - License: MIT
 - Repository: https://github.com/RAliane-REBORN/theMQL
 - Toolchain: stable channel, no version pin
 - Workspace resolver: 2
-- Branch: `feat/phase-4-mqtt-auth-embedded` (off main, post PR #5 merge)
+- Branch: `feat/phase-5-no_std-authz` (off main, post PR #6 merge)
 
 ### Crates (20)
 
@@ -94,18 +94,18 @@ deliberate, not an oversight.
 | themql-cache | cache | Cache trait, CacheEntry, CacheHit, CacheError | 16 |
 | themql-storage | storage | Storage/Reader/Writer traits, StorageKey/Value/Query/ResultSet | 23 |
 | themql-transport | transport | Bridge trait, BridgeRoute, TransportKind, TransportError | 14 |
-| themql-graphql | transport | GraphqlSchema/GraphqlResolverBridge traits, Query/Mutation/Subscription roots | 4 |
-| themql-mqtt | transport | MqttTransport/Publisher/Subscriber traits, MqttQos, SubscriptionId | 9 |
+| themql-graphql | transport | GraphqlSchema/GraphqlResolverBridge traits, Query/Mutation/Subscription roots, AuthRole + RoleGuard | 20 |
+| themql-mqtt | transport | MqttTransport/Publisher/Subscriber traits, MqttQos, SubscriptionId, MqttAcl/AclRule | 39 |
 | themql-sse | transport | SseStream/SsePublisher traits, SseEvent, SseError | 8 |
 | themql-telemetry | telemetry | TelemetryMessage, sensor structs (GPS/Baro/IMU), StateEstimate, Covariance [f64;441] | 14 |
 | themql-analysis | desktop | AnalysisPipeline trait, DatasetBuilder, ThedafAdapter | 5 |
 | themql-training | desktop | Trainer trait, Dataset, TrainingConfig, TrainedModel | 5 |
 | themql-inference | embedded | InferenceEngine trait, ResourceBudget, RollbackHandle (TETANUS) | 6 |
 | themql-artifact | cross-cutting | ArtifactValidator/Loader/Writer, ModelArtifact (TETANUS) | 5 |
-| themql-gnc | embedded | Controller trait, PID/LQRI/Hybrid, GncState 21-dim (TETANUS) | 7 |
-| themql-estimation | embedded | Estimator trait, Ekf, EstimatorState 21-dim (TETANUS) | 6 |
-| themql-embedded | binary | SensorDriver trait, GpsDriver/BaroDriver/ImuDriver, SensorError 5 variants (TETANUS) | 10 |
-| themql-desktop | binary | Cli (clap), tokio main, ratatui/crossterm TUI dashboard, 3-pane layout | 13 |
+| themql-gnc | embedded | Controller trait, PID/LQRI/Hybrid, GncState 21-dim, no_std+alloc (TETANUS) | 7 |
+| themql-estimation | embedded | Estimator trait, Ekf, Estimator State 21-dim, no_std+alloc (TETANUS) | 24 |
+| themql-embedded | binary | SensorDriver trait, real EKF+HybridController pipeline, embassy tasks (TETANUS) | 19 |
+| themql-desktop | binary | Cli (clap), tokio main, authz wiring, MQTT ACL mapping, ratatui TUI | 19 |
 
 Total: 304 unit tests + 1 doc test pass workspace-wide (default
 features) at the Phase 3 close. Per-crate counts: analysis 12,

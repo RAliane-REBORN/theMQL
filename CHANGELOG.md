@@ -5,6 +5,52 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 5: no_std GNC/estimation + embedded EKF/controller + authz
+
+Three steps completing Phase 5:
+
+#### Step 1 — no_std migration of themql-gnc + themql-estimation
+
+- Both crates now compile with `--no-default-features` (no_std + alloc).
+- `default = ["std"]` feature gates `themql-core` + `thiserror/std`.
+- `nalgebra` with `default-features = false` + `libm` for float
+  transcendentals. `num-traits` with `libm` for `Real` trait
+  (estimation, no_std mode only).
+- `extern crate alloc;` + `use alloc::string::String / vec::Vec`.
+- `core::fmt` / `core::ptr` instead of `std::fmt` / `std::ptr`.
+- `#[cfg(feature = "std")]` gate on `From<Error> for themql_core::Error`.
+- Tests pass in both std and no_std modes.
+
+#### Step 2 — Wire real EKF + HybridController into embedded binary
+
+- Global allocator (`embedded-alloc::TlsfHeap`, 16KB heap) for alloc.
+- `estimator_task`: real EKF predict (IMU) + update (GPS/baro) cycle.
+- `controller_task`: real `HybridController` consuming `EstimatorState`.
+- `estimator_to_gnc_state` free function maps 21-dim state to `GncState`.
+- `EST_CHAN`: estimator→controller channel (capacity 4).
+- Sensor decode functions (stub drivers → zero readings).
+- Single `unsafe` block in `main()` for allocator init (TETANUS
+  justified). `forbid(unsafe_code)` → `deny(unsafe_code)`.
+- +3 host tests (19 total in themql-embedded).
+
+#### Step 3 — GraphQL authz + MQTT topic ACLs
+
+- `AuthRole` enum (Admin, Operator, Observer) with hierarchy.
+- `RoleGuard` implementing `async_graphql::Guard` trait.
+- QueryRoot fields guarded with Observer (read-only).
+- MutationRoot fields guarded with Operator (write).
+- SubscriptionRoot fields guarded with Observer.
+- `GraphqlSchemaImpl::with_role()` injects role as global data.
+- MQTT `AclAction` / `AclRule` / `MqttAcl` with topic pattern matching.
+- `admin_acl`/`operator_acl`/`observer_acl` presets per specs/auth.toml.
+- `RumqttcConfig.with_acl()` + transport checks ACL before pub/sub.
+- Desktop: `serve()` uses `with_role(Admin)`, MQTT username → ACL.
+- Replaced unmaintained `alloc-cortex-m` with `embedded-alloc` 0.7.
+- +17 authz tests across graphql, mqtt, desktop crates.
+
+**Totals**: 341 tests pass (was 325). Full validation green: fmt, check,
+clippy, test, deny, machete, embedded-check, toml-sanity, ci-guard.
+
 ### 2026-08-20 — Phase 4: MQTT bridge + auth + embedded embassy main
 
 Four steps completing the Phase 4 follow-ups:
