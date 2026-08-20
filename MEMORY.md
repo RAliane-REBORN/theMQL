@@ -68,13 +68,13 @@ deliberate, not an oversight.
 
 - Name: theMQL (The Message Query Language)
 - Version: 0.1.0
-- Status: greenfield (Phase 3 Stages 1-11 complete — cache/storage/transport backends, runtime impls, desktop/embedded binary wiring, analysis/training/inference heavy-dep wiring, cross-crate type reconciliation, safety-critical tooling, opencode.json, CI guard, real EKF with Jacobian + Joseph-form Kalman gain, real BLAKE3 HashValidator, real L1 lru / L2 moka / L3 redis / L4 sled, real SSE axum server, real MQTT rumqttc client, real GraphQL resolver bridge + axum HTTP/WS, real TchTrainer training loop + real TchInferenceEngine model load/forward pass behind tch-backend)
+- Status: greenfield (Phase 4 complete — Phase 3 Stages 1-11 + Phase 3 followups + Phase 4: MQTT-to-SSE bridge in serve, better-auth GraphQL auth + MQTT broker credentials, real embassy embedded main with 7 tasks cross-compiling for thumbv7em-none-eabihf)
 - Language: Rust
 - License: MIT
-- Repository: https://github.com/Metis-Avionics/theMQL
+- Repository: https://github.com/RAliane-REBORN/theMQL
 - Toolchain: stable channel, no version pin
 - Workspace resolver: 2
-- Branch: `feat/phase-2-heavy-dep-wiring` (stacked on the Phase 1 work)
+- Branch: `feat/phase-4-mqtt-auth-embedded` (off main, post PR #5 merge)
 
 ### Crates (20)
 

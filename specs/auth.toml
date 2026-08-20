@@ -1,0 +1,96 @@
+[subsystem]
+name = "auth"
+crate = "themql-desktop"
+domain = "cross-cutting"
+
+[purpose]
+description = """
+Authentication and authorization for theMQL's transport layer. GraphQL
+session auth uses `better-auth` (email/password plugin, JWT sessions).
+MQTT broker authn uses plain username/password credentials in
+RumqttcConfig. Authz is subject-pattern ACLs per role.
+"""
+
+[references]
+related = [
+    "specs/transport.toml",
+    "specs/mqtt.toml",
+    "specs/graphql.toml",
+    "specs/desktop.toml"
+]
+
+[implementation]
+library = "better-auth"
+version = "0.10"
+features = ["axum"]
+default_features = false
+database_adapter = "MemoryDatabaseAdapter"
+plugin = "EmailPasswordPlugin"
+
+[authn.graphql]
+framework = "better-auth"
+session_strategy = "jwt_cookie"
+signup = true
+signin = true
+signout = true
+secret_source = "env THEMQL_AUTH_SECRET (>= 32 chars)"
+
+[authn.mqtt]
+method = "username_password"
+tls = "optional (port 8883)"
+credentials_source = "RumqttcConfig fields (username, password)"
+credentials_in_source = false
+
+[authz]
+model = "role-based"
+roles = ["admin", "operator", "observer"]
+
+[authz.graphql]
+admin = "all queries, mutations, subscriptions"
+operator = "all queries, mutations on vehicle.*, subscriptions"
+observer = "read-only queries on vehicle.*, subscriptions only"
+
+[authz.mqtt]
+admin = "publish + subscribe on all topics"
+operator = "publish + subscribe on vehicle.*"
+observer = "subscribe only on vehicle.*"
+
+[api]
+public_types = [
+    "AuthState",
+    "MqttCredentials"
+]
+
+[api.AuthState]
+description = "Holds the BetterAuth instance and configuration"
+rust_type = """
+struct AuthState {
+    auth: BetterAuth<MemoryDatabaseAdapter>,
+}
+"""
+
+[api.MqttCredentials]
+description = "Username/password credentials for MQTT broker authn"
+rust_type = """
+struct MqttCredentials {
+    username: String,
+    password: String,
+}
+"""
+
+[constraints]
+no_custom_auth_engine = true
+no_secrets_in_source = true
+credentials_from_env_or_config = true
+better_auth_types_must_not_escape_desktop = true
+auth_must_not_touch_safety_critical_crates = true
+
+[lifecycle]
+graphql_session = "created on signin, validated per request via middleware"
+mqtt_credentials = "set at connect time, held for connection lifetime"
+token_expiry = "configured in AuthConfig, default 7 days"
+
+[threading]
+send_required = true
+sync_required = true
+async_required = true

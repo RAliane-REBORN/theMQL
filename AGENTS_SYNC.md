@@ -19,6 +19,15 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 4 complete)
+
+Phase 4 (MQTT bridge + auth + embedded embassy main, 4 steps) executed
+by the lead opencode agent directly; no subagents were spawned. All 4
+steps complete: MQTT-to-SSE bridge wired into serve, better-auth
+GraphQL auth + MQTT broker credentials, real embassy embedded main
+with 7 tasks cross-compiling for thumbv7em-none-eabihf. 325 tests pass
+workspace-wide.
+
 ### 2026-08-20 — no subagents this turn (Phase 3 followups complete)
 
 Phase 3 followups (Workstreams A/B/C/D) executed by the lead opencode

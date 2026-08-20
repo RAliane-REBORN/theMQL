@@ -63,6 +63,31 @@ struct ServeArgs {
     /// Whether to enable the MQTT bridge.
     #[arg(long, default_value_t = false)]
     enable_mqtt: bool,
+    /// MQTT broker host (used when `--enable-mqtt` is set).
+    #[arg(long, default_value = "localhost")]
+    mqtt_host: String,
+    /// MQTT broker port (used when `--enable-mqtt` is set).
+    #[arg(long, default_value_t = 1883)]
+    mqtt_port: u16,
+    /// MQTT client id (used when `--enable-mqtt` is set).
+    #[arg(long, default_value = "themql-desktop")]
+    mqtt_client_id: String,
+    /// MQTT broker username (used when `--enable-mqtt` is set). Per
+    /// `specs/auth.toml [authn.mqtt]`, credentials must come from env or
+    /// CLI, not source.
+    #[arg(long)]
+    mqtt_username: Option<String>,
+    /// MQTT broker password (used when `--enable-mqtt` is set).
+    #[arg(long)]
+    mqtt_password: Option<String>,
+    /// Whether to enable GraphQL session auth via `better-auth`.
+    #[arg(long, default_value_t = false)]
+    enable_auth: bool,
+    /// Auth secret for JWT session signing (>= 32 chars). Can also be
+    /// set via `THEMQL_AUTH_SECRET` env var. Per `specs/auth.toml
+    /// [authn.graphql]`, must not appear in source.
+    #[arg(long)]
+    auth_secret: Option<String>,
 }
 
 /// Arguments for the `analyze` subcommand.
@@ -178,9 +203,62 @@ impl themql_core::MessageHandler for DesktopHandler {
     }
 }
 
+/// MQTT-to-SSE bridge: re-publishes incoming MQTT messages to the SSE
+/// publisher. Per `specs/transport.toml [bridges]`, the bridge routes
+/// via `themql-core Message`, never adapter-to-adapter. This struct
+/// implements `MessageHandler` so it can be registered with
+/// `MqttSubscriber::subscribe`.
+struct MqttToSseBridge {
+    publisher: std::sync::Arc<themql_sse::TokioSsePublisher>,
+}
+
+impl MqttToSseBridge {
+    /// Construct a bridge that forwards to the given SSE publisher.
+    #[must_use]
+    fn new(publisher: std::sync::Arc<themql_sse::TokioSsePublisher>) -> Self {
+        Self { publisher }
+    }
+}
+
+impl themql_core::MessageHandler for MqttToSseBridge {
+    fn handle<'a>(
+        &'a self,
+        msg: &'a themql_core::Message,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<themql_core::Response, themql_core::Error>>
+                + Send
+                + 'a,
+        >,
+    > {
+        use themql_sse::SsePublisher;
+        let publisher = std::sync::Arc::clone(&self.publisher);
+        let subject = msg.subject.clone();
+        let msg_clone = msg.clone();
+        Box::pin(async move {
+            publisher
+                .broadcast(&subject, &msg_clone)
+                .await
+                .map_err(|e| themql_core::Error::transport_error(e.to_string()))?;
+            Ok(themql_core::Response::ok(
+                themql_core::ResponseValue::Json(serde_json::json!({
+                    "bridged": true,
+                    "subject": subject.as_str(),
+                })),
+                themql_core::CorrelationId::new(),
+            ))
+        })
+    }
+}
+
 /// Start the desktop server: GraphQL (POST /graphql + WS /graphql) and
-/// SSE (GET /events) on the same axum router.
+/// SSE (GET /events) on the same axum router. When `--enable-mqtt` is
+/// set, an MQTT-to-SSE bridge forwards incoming MQTT messages on
+/// `vehicle.events` to the SSE publisher. When `--enable-auth` is set,
+/// `better-auth` session auth routes are mounted at `/api/auth/*`.
+#[allow(clippy::too_many_lines)]
 async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
+    use better_auth::handlers::axum::AxumIntegration;
     use std::sync::Arc;
     use themql_graphql::{
         DispatchBridgeImpl, GraphqlResolverBridgeImpl, GraphqlSchema, GraphqlSchemaImpl,
@@ -205,17 +283,90 @@ async fn serve(args: &ServeArgs) -> Result<(), themql_core::Error> {
 
     let sse_subject = themql_core::Subject::from_str("vehicle.events")
         .map_err(|e| themql_core::Error::validation_error(e.to_string()))?;
-    let sse_publisher = TokioSsePublisher::new();
-    let sse_router = themql_sse::serve_sse(sse_publisher, sse_subject);
+    let sse_router = themql_sse::serve_sse_with_publisher(Arc::clone(&publisher), sse_subject);
     let graphql_router = themql_graphql::serve_graphql(schema.schema().clone());
-    let app = graphql_router.merge(sse_router);
+    let mut app = graphql_router.merge(sse_router);
+
+    if args.enable_auth {
+        let secret = if let Some(s) = &args.auth_secret {
+            s.clone()
+        } else if let Ok(s) = std::env::var("THEMQL_AUTH_SECRET") {
+            s
+        } else {
+            return Err(themql_core::Error::validation_error(
+                "auth enabled but no secret provided (--auth-secret or THEMQL_AUTH_SECRET)",
+            ));
+        };
+        if secret.len() < 32 {
+            return Err(themql_core::Error::validation_error(
+                "auth secret must be at least 32 characters",
+            ));
+        }
+
+        let auth_config = better_auth::AuthConfig::new(secret)
+            .base_url(format!("http://{}:{}", args.bind, args.port));
+        let auth = better_auth::AuthBuilder::new(auth_config)
+            .database(better_auth::MemoryDatabaseAdapter::new())
+            .plugin(better_auth::plugins::EmailPasswordPlugin::new())
+            .build()
+            .await
+            .map_err(|e| themql_core::Error::internal_error(format!("auth init: {e}")))?;
+
+        let auth_arc = Arc::new(auth);
+        let auth_router = Arc::clone(&auth_arc).axum_router().with_state(auth_arc);
+        app = app.merge(auth_router);
+
+        println!("themql-desktop: auth enabled (better-auth, email/password)");
+    }
 
     let addr: std::net::SocketAddr = format!("{}:{}", args.bind, args.port)
         .parse()
         .map_err(|e| themql_core::Error::internal_error(format!("invalid bind address: {e}")))?;
     println!("themql-desktop: serving GraphQL + SSE on http://{addr}");
+
     if args.enable_mqtt {
-        println!("themql-desktop: MQTT bridge enabled (not yet wired)");
+        use themql_mqtt::MqttSubscriber;
+        let mut mqtt_config = themql_mqtt::RumqttcConfig::new(
+            args.mqtt_host.as_str(),
+            args.mqtt_port,
+            args.mqtt_client_id.as_str(),
+        );
+        if let (Some(u), Some(p)) = (&args.mqtt_username, &args.mqtt_password) {
+            mqtt_config = mqtt_config.with_credentials(u, p);
+        }
+        let transport = Arc::new(themql_mqtt::RumqttcTransport::new(&mqtt_config));
+        let bridge_publisher = Arc::clone(&publisher);
+        let mqtt_bridge = MqttToSseBridge::new(bridge_publisher);
+
+        let subscribe_subject = themql_core::Subject::from_str("vehicle.events")
+            .map_err(|e| themql_core::Error::validation_error(e.to_string()))?;
+        transport
+            .subscribe(&subscribe_subject, mqtt_bridge)
+            .await
+            .map_err(|e| themql_core::Error::transport_error(e.to_string()))?;
+
+        let poll_transport = Arc::clone(&transport);
+        tokio::spawn(async move {
+            loop {
+                match poll_transport.poll().await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("themql-desktop: MQTT poll error: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let cred_msg = if args.mqtt_username.is_some() {
+            " (authenticated)"
+        } else {
+            ""
+        };
+        println!(
+            "themql-desktop: MQTT bridge connected to {}:{}{cred_msg} (subscribing to vehicle.events)",
+            args.mqtt_host, args.mqtt_port
+        );
     }
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -646,5 +797,82 @@ mod tests {
         let bytes = [0xab, 0xcd, 0xef];
         let hex = hex_first_16(&bytes);
         assert_eq!(hex, "abcdef");
+    }
+
+    #[test]
+    fn mqtt_to_sse_bridge_constructs() {
+        use std::sync::Arc;
+        use themql_sse::TokioSsePublisher;
+        let publisher = Arc::new(TokioSsePublisher::new());
+        let bridge = MqttToSseBridge::new(publisher);
+        let _ = &bridge;
+    }
+
+    #[test]
+    fn mqtt_transport_constructs_without_io() {
+        let config = themql_mqtt::RumqttcConfig::new("localhost", 1883, "themql-desktop-test");
+        let _transport = themql_mqtt::RumqttcTransport::new(&config);
+    }
+
+    #[test]
+    fn cli_parses_serve_with_mqtt_args() {
+        let cli = Cli::parse_from([
+            "themql-desktop",
+            "serve",
+            "--enable-mqtt",
+            "--mqtt-host",
+            "broker.local",
+            "--mqtt-port",
+            "8883",
+            "--mqtt-client-id",
+            "test-client",
+            "--mqtt-username",
+            "op",
+            "--mqtt-password",
+            "secret",
+        ]);
+        match cli.command {
+            Command::Serve(args) => {
+                assert!(args.enable_mqtt);
+                assert_eq!(args.mqtt_host, "broker.local");
+                assert_eq!(args.mqtt_port, 8883);
+                assert_eq!(args.mqtt_client_id, "test-client");
+                assert_eq!(args.mqtt_username.as_deref(), Some("op"));
+                assert_eq!(args.mqtt_password.as_deref(), Some("secret"));
+            }
+            _ => panic!("must parse Serve subcommand"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_serve_with_auth_args() {
+        let cli = Cli::parse_from([
+            "themql-desktop",
+            "serve",
+            "--enable-auth",
+            "--auth-secret",
+            "this-is-a-very-long-secret-key-for-testing-ok",
+        ]);
+        match cli.command {
+            Command::Serve(args) => {
+                assert!(args.enable_auth);
+                assert_eq!(
+                    args.auth_secret.as_deref(),
+                    Some("this-is-a-very-long-secret-key-for-testing-ok")
+                );
+            }
+            _ => panic!("must parse Serve subcommand"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_builds_with_memory_adapter() {
+        let config = better_auth::AuthConfig::new("test-secret-key-that-is-at-least-32-chars!!");
+        let auth = better_auth::AuthBuilder::new(config)
+            .database(better_auth::MemoryDatabaseAdapter::new())
+            .plugin(better_auth::plugins::EmailPasswordPlugin::new())
+            .build()
+            .await;
+        assert!(auth.is_ok());
     }
 }

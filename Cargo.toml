@@ -44,6 +44,7 @@ serde_json = "1"
 async-graphql = "8.0.0-rc.5"
 embassy-sync = "0.8"
 embassy-executor = "0.10"
+embassy-time = "0.5"
 
 # Cache / storage
 cachelito = "0.16"
@@ -76,11 +77,18 @@ lru = "0.12"
 redis = { version = "0.27", features = ["tokio-comp"] }
 sled = "0.34"
 
+# Embedded
+heapless = "0.8"
+cortex-m-rt = "0.7"
+
 # HTTP / MQTT
 axum = "0.8"
 async-graphql-axum = "8.0.0-rc.5"
 rumqttc = "0.24"
 futures-util = "0.3"
+
+# Auth
+better-auth = { version = "0.10", features = ["axum", "rustls"], default-features = false }
 
 # Internal crates — self-references for cross-crate deps via workspace=true
 themql-core = { path = "crates/themql-core" }
