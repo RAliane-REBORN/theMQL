@@ -173,6 +173,137 @@ impl From<ClientError> for MqttError {
 }
 
 // ===========================================================================
+// ACL — topic-based authorization per role
+// ===========================================================================
+
+/// Authorization action for MQTT ACL rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AclAction {
+    /// Publish (write) permission.
+    Publish,
+    /// Subscribe (read) permission.
+    Subscribe,
+    /// Both publish and subscribe.
+    PubSub,
+}
+
+/// A single ACL rule: an action allowed on a topic pattern.
+/// Topic patterns use `*` as a wildcard suffix (e.g. `vehicle.*`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AclRule {
+    /// Action permitted by this rule.
+    pub action: AclAction,
+    /// Topic pattern (`*` suffix matches any sub-topic).
+    pub topic_pattern: String,
+}
+
+impl AclRule {
+    /// Create a publish rule for the given pattern.
+    #[must_use]
+    pub fn publish(pattern: impl Into<String>) -> Self {
+        Self {
+            action: AclAction::Publish,
+            topic_pattern: pattern.into(),
+        }
+    }
+
+    /// Create a subscribe rule for the given pattern.
+    #[must_use]
+    pub fn subscribe(pattern: impl Into<String>) -> Self {
+        Self {
+            action: AclAction::Subscribe,
+            topic_pattern: pattern.into(),
+        }
+    }
+
+    /// Create a pub+sub rule for the given pattern.
+    #[must_use]
+    pub fn pubsub(pattern: impl Into<String>) -> Self {
+        Self {
+            action: AclAction::PubSub,
+            topic_pattern: pattern.into(),
+        }
+    }
+
+    /// Check if a topic matches this rule's pattern.
+    fn topic_matches(&self, topic: &str) -> bool {
+        if self.topic_pattern == "*" {
+            return true;
+        }
+        if let Some(prefix) = self.topic_pattern.strip_suffix(".*") {
+            topic == prefix || topic.starts_with(&format!("{prefix}."))
+        } else {
+            topic == self.topic_pattern
+        }
+    }
+
+    /// Check if this rule permits the given action on the given topic.
+    #[must_use]
+    pub fn permits(&self, action: AclAction, topic: &str) -> bool {
+        let action_ok = match (self.action, action) {
+            (AclAction::PubSub, _) => true,
+            (AclAction::Publish, AclAction::Publish) => true,
+            (AclAction::Subscribe, AclAction::Subscribe) => true,
+            _ => false,
+        };
+        action_ok && self.topic_matches(topic)
+    }
+}
+
+/// A set of ACL rules for a single client/role. Checked before any
+/// publish or subscribe operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MqttAcl {
+    /// Rules for this client.
+    pub rules: Vec<AclRule>,
+}
+
+impl MqttAcl {
+    /// Create an empty ACL (denies everything).
+    #[must_use]
+    pub fn new() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// Add a rule to this ACL.
+    #[must_use]
+    pub fn allow(mut self, rule: AclRule) -> Self {
+        self.rules.push(rule);
+        self
+    }
+
+    /// Check if the ACL permits the given action on the given topic.
+    #[must_use]
+    pub fn permits(&self, action: AclAction, topic: &str) -> bool {
+        self.rules.iter().any(|r| r.permits(action, topic))
+    }
+}
+
+impl Default for MqttAcl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Default ACL for the `admin` role: pub+sub on all topics.
+#[must_use]
+pub fn admin_acl() -> MqttAcl {
+    MqttAcl::new().allow(AclRule::pubsub("*"))
+}
+
+/// Default ACL for the `operator` role: pub+sub on `vehicle.*`.
+#[must_use]
+pub fn operator_acl() -> MqttAcl {
+    MqttAcl::new().allow(AclRule::pubsub("vehicle.*"))
+}
+
+/// Default ACL for the `observer` role: subscribe only on `vehicle.*`.
+#[must_use]
+pub fn observer_acl() -> MqttAcl {
+    MqttAcl::new().allow(AclRule::subscribe("vehicle.*"))
+}
+
+// ===========================================================================
 // Subject ↔ MQTT topic mapping
 // ===========================================================================
 
@@ -262,6 +393,9 @@ pub struct RumqttcConfig {
     pub username: Option<String>,
     /// Optional broker password for SASL authentication.
     pub password: Option<String>,
+    /// Optional ACL restricting publish/subscribe topics. When `None`,
+    /// all topics are allowed (backwards-compatible with no auth).
+    pub acl: Option<MqttAcl>,
 }
 
 impl RumqttcConfig {
@@ -279,6 +413,7 @@ impl RumqttcConfig {
             auto_reconnect: false,
             username: None,
             password: None,
+            acl: None,
         }
     }
 
@@ -307,6 +442,14 @@ impl RumqttcConfig {
     ) -> Self {
         self.username = Some(username.into());
         self.password = Some(password.into());
+        self
+    }
+
+    /// Set an ACL restricting which topics this client can publish
+    /// and subscribe to. Per `specs/auth.toml [authz.mqtt]`.
+    #[must_use]
+    pub fn with_acl(mut self, acl: MqttAcl) -> Self {
+        self.acl = Some(acl);
         self
     }
 
@@ -347,6 +490,7 @@ pub struct RumqttcTransport {
     handlers: Arc<Mutex<HashMap<SubscriptionId, Box<dyn ErasedHandler>>>>,
     next_id: AtomicU64,
     topic_index: Arc<Mutex<HashMap<SubscriptionId, String>>>,
+    acl: Option<MqttAcl>,
 }
 
 impl RumqttcTransport {
@@ -363,6 +507,7 @@ impl RumqttcTransport {
             handlers: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
             topic_index: Arc::new(Mutex::new(HashMap::new())),
+            acl: config.acl.clone(),
         }
     }
 
@@ -452,6 +597,13 @@ fn matches_filter(filter: &str, topic: &str) -> bool {
 impl MqttPublisher for RumqttcTransport {
     async fn publish(&self, topic: &Subject, payload: &Message) -> Result<(), MqttError> {
         let topic_str = subject_to_topic(topic);
+        if let Some(acl) = &self.acl {
+            if !acl.permits(AclAction::Publish, &topic_str) {
+                return Err(MqttError::PublishFailed(format!(
+                    "ACL denied publish on topic '{topic_str}'"
+                )));
+            }
+        }
         let bytes = encode_message(payload)?;
         self.client
             .publish(topic_str, RumqttcQos::AtLeastOnce, false, bytes)
@@ -468,6 +620,13 @@ impl MqttSubscriber for RumqttcTransport {
     ) -> Result<SubscriptionId, MqttError> {
         let id = SubscriptionId::new(self.next_id.fetch_add(1, Ordering::SeqCst));
         let topic_str = subject_to_topic(topic);
+        if let Some(acl) = &self.acl {
+            if !acl.permits(AclAction::Subscribe, &topic_str) {
+                return Err(MqttError::SubscribeFailed(format!(
+                    "ACL denied subscribe on topic '{topic_str}'"
+                )));
+            }
+        }
         self.client
             .subscribe(topic_str.clone(), RumqttcQos::AtLeastOnce)
             .await
@@ -725,5 +884,93 @@ mod tests {
         let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1");
         let opts = cfg.to_mqtt_options();
         assert!(opts.credentials().is_none());
+    }
+
+    // --- ACL tests ---
+
+    #[test]
+    fn acl_rule_topic_matches_exact() {
+        let rule = AclRule::pubsub("vehicle.events");
+        assert!(rule.topic_matches("vehicle.events"));
+        assert!(!rule.topic_matches("vehicle.state"));
+        assert!(!rule.topic_matches("vehicle.events.imu"));
+    }
+
+    #[test]
+    fn acl_rule_topic_matches_wildcard() {
+        let rule = AclRule::pubsub("vehicle.*");
+        assert!(rule.topic_matches("vehicle"));
+        assert!(rule.topic_matches("vehicle.events"));
+        assert!(rule.topic_matches("vehicle.events.imu"));
+        assert!(!rule.topic_matches("system.events"));
+    }
+
+    #[test]
+    fn acl_rule_topic_matches_star() {
+        let rule = AclRule::pubsub("*");
+        assert!(rule.topic_matches("anything"));
+        assert!(rule.topic_matches("vehicle.events"));
+    }
+
+    #[test]
+    fn acl_rule_permits_action() {
+        let rule = AclRule::subscribe("vehicle.*");
+        assert!(rule.permits(AclAction::Subscribe, "vehicle.events"));
+        assert!(!rule.permits(AclAction::Publish, "vehicle.events"));
+    }
+
+    #[test]
+    fn acl_permits_admin_all() {
+        let acl = admin_acl();
+        assert!(acl.permits(AclAction::Publish, "anything"));
+        assert!(acl.permits(AclAction::Subscribe, "vehicle.events"));
+        assert!(acl.permits(AclAction::PubSub, "system.config"));
+    }
+
+    #[test]
+    fn acl_permits_operator_vehicle() {
+        let acl = operator_acl();
+        assert!(acl.permits(AclAction::Publish, "vehicle.events"));
+        assert!(acl.permits(AclAction::Subscribe, "vehicle.state"));
+        assert!(!acl.permits(AclAction::Publish, "system.config"));
+    }
+
+    #[test]
+    fn acl_permits_observer_subscribe_only() {
+        let acl = observer_acl();
+        assert!(acl.permits(AclAction::Subscribe, "vehicle.events"));
+        assert!(!acl.permits(AclAction::Publish, "vehicle.events"));
+        assert!(!acl.permits(AclAction::Subscribe, "system.config"));
+    }
+
+    #[test]
+    fn acl_empty_denies_all() {
+        let acl = MqttAcl::new();
+        assert!(!acl.permits(AclAction::Publish, "vehicle.events"));
+        assert!(!acl.permits(AclAction::Subscribe, "vehicle.events"));
+    }
+
+    #[test]
+    fn rumqttc_config_with_acl_stores_acl() {
+        let acl = observer_acl();
+        let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1").with_acl(acl);
+        assert!(cfg.acl.is_some());
+        assert!(cfg.acl.as_ref().unwrap().permits(AclAction::Subscribe, "vehicle.events"));
+        assert!(!cfg.acl.as_ref().unwrap().permits(AclAction::Publish, "vehicle.events"));
+    }
+
+    #[test]
+    fn rumqttc_config_check_acl_allows_without_acl() {
+        let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1");
+        assert!(cfg.acl.is_none());
+    }
+
+    #[test]
+    fn rumqttc_config_check_acl_denies_with_acl() {
+        let cfg = RumqttcConfig::new("broker.local", 1883, "themql-1").with_acl(observer_acl());
+        let acl = cfg.acl.as_ref().expect("acl set");
+        assert!(acl.permits(AclAction::Subscribe, "vehicle.events"));
+        assert!(!acl.permits(AclAction::Publish, "vehicle.events"));
+        assert!(!acl.permits(AclAction::Subscribe, "system.config"));
     }
 }

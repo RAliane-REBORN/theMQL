@@ -36,8 +36,7 @@ use themql_core::{
 };
 use thiserror::Error;
 
-use async_graphql::Object;
-use async_graphql::Subscription;
+use async_graphql::{Guard, Object, Subscription};
 
 use futures_util::stream::Stream;
 
@@ -260,6 +259,72 @@ impl GraphqlSubscriptionSource for themql_sse::TokioSsePublisher {
 }
 
 // ===========================================================================
+// Authz — roles and field guards
+// ===========================================================================
+
+/// User role for authorization. Per `specs/auth.toml [authz]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuthRole {
+    /// Full access: all queries, mutations, subscriptions.
+    Admin,
+    /// Operator: all queries, mutations on vehicle.*, subscriptions.
+    Operator,
+    /// Observer: read-only queries on vehicle.*, subscriptions only.
+    Observer,
+}
+
+impl AuthRole {
+    /// Returns `true` if this role satisfies the `required` role
+    /// (admin > operator > observer).
+    #[must_use]
+    pub fn satisfies(self, required: AuthRole) -> bool {
+        match (self, required) {
+            (AuthRole::Admin, _) => true,
+            (AuthRole::Operator, AuthRole::Admin) => false,
+            (AuthRole::Operator, _) => true,
+            (AuthRole::Observer, AuthRole::Observer) => true,
+            (AuthRole::Observer, _) => false,
+        }
+    }
+}
+
+/// GraphQL field guard that requires a minimum [`AuthRole`]. The role
+/// is read from `async_graphql::Context::data::<AuthRole>()`.
+#[derive(Debug, Clone, Copy)]
+pub struct RoleGuard {
+    /// Minimum role required to access the field.
+    pub required: AuthRole,
+}
+
+impl RoleGuard {
+    /// Create a guard requiring the given role.
+    #[must_use]
+    pub fn new(required: AuthRole) -> Self {
+        Self { required }
+    }
+}
+
+impl Guard for RoleGuard {
+    async fn check(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<()> {
+        match ctx.data::<AuthRole>() {
+            Ok(role) => {
+                if role.satisfies(self.required) {
+                    Ok(())
+                } else {
+                    Err(async_graphql::Error::new(format!(
+                        "insufficient role: requires {:?}, have {:?}",
+                        self.required, role
+                    )))
+                }
+            }
+            Err(_) => Err(async_graphql::Error::new(
+                "no auth role in context (auth not enabled?)",
+            )),
+        }
+    }
+}
+
+// ===========================================================================
 // Root types — QueryRoot, MutationRoot, SubscriptionRoot
 // ===========================================================================
 
@@ -282,6 +347,8 @@ impl QueryRoot {
 impl QueryRoot {
     /// Resolve a single resource identified by `subject`, optionally
     /// narrowed by a JSON `selection` and resolver `args`.
+    /// Requires `Observer` role (read-only access).
+    #[graphql(guard = "RoleGuard::new(AuthRole::Observer)")]
     async fn resource(
         &self,
         subject: String,
@@ -302,6 +369,8 @@ impl QueryRoot {
     /// Resolve all resources matching a subject `pattern`. The current
     /// bridge delegates the pattern resolution to the underlying
     /// resolver as a single field call.
+    /// Requires `Observer` role (read-only access).
+    #[graphql(guard = "RoleGuard::new(AuthRole::Observer)")]
     async fn resources(
         &self,
         pattern: String,
@@ -340,6 +409,8 @@ impl MutationRoot {
 #[Object]
 impl MutationRoot {
     /// Dispatch a command to `subject` with the given JSON `payload`.
+    /// Requires `Operator` role (write access).
+    #[graphql(guard = "RoleGuard::new(AuthRole::Operator)")]
     async fn dispatch(
         &self,
         subject: String,
@@ -381,11 +452,13 @@ impl SubscriptionRoot {
 impl SubscriptionRoot {
     /// Subscribe to updates for `subject`. Returns a live stream of
     /// JSON-encoded events from the underlying subscription source.
+    /// Requires `Observer` role (read-only access).
     ///
     /// # Errors
     /// Returns an `async_graphql::Error` if no subscription source is
     /// configured, if the subject is invalid, or if the subscription
     /// cannot be established.
+    #[graphql(guard = "RoleGuard::new(AuthRole::Observer)")]
     async fn subscribe(
         &self,
         subject: String,
@@ -426,10 +499,27 @@ pub struct GraphqlSchemaImpl {
 
 impl GraphqlSchemaImpl {
     /// Build a schema from the given query, mutation, and subscription
-    /// roots.
+    /// roots. No auth role is injected — all guarded fields will
+    /// reject requests. Use [`GraphqlSchemaImpl::with_role`] for
+    /// authenticated schemas.
     #[must_use]
     pub fn new(query: QueryRoot, mutation: MutationRoot, subscription: SubscriptionRoot) -> Self {
         let schema = async_graphql::Schema::build(query, mutation, subscription).finish();
+        Self { schema }
+    }
+
+    /// Build a schema with a default [`AuthRole`] injected as global
+    /// data. All guarded fields will use this role for authorization.
+    #[must_use]
+    pub fn with_role(
+        query: QueryRoot,
+        mutation: MutationRoot,
+        subscription: SubscriptionRoot,
+        role: AuthRole,
+    ) -> Self {
+        let schema = async_graphql::Schema::build(query, mutation, subscription)
+            .data(role)
+            .finish();
         Self { schema }
     }
 }
@@ -615,10 +705,11 @@ mod tests {
             Arc::new(GraphqlResolverBridgeImpl::new(resolver));
         let dispatch: Arc<dyn DispatchBridge> =
             Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
-        let schema = GraphqlSchemaImpl::new(
+        let schema = GraphqlSchemaImpl::with_role(
             QueryRoot::new(bridge),
             MutationRoot::new(dispatch),
             SubscriptionRoot::default(),
+            AuthRole::Observer,
         );
         let q = r#"{ resource(subject: "vehicle.sensors.imu") }"#;
         let result = schema.schema().execute(q).await;
@@ -637,10 +728,11 @@ mod tests {
             Arc::new(GraphqlResolverBridgeImpl::new(resolver));
         let dispatch: Arc<dyn DispatchBridge> =
             Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
-        let schema = GraphqlSchemaImpl::new(
+        let schema = GraphqlSchemaImpl::with_role(
             QueryRoot::new(bridge),
             MutationRoot::new(dispatch),
             SubscriptionRoot::default(),
+            AuthRole::Operator,
         );
         let q = r#"mutation { dispatch(subject: "vehicle.command", payload: {x: 1}) }"#;
         let result = schema.schema().execute(q).await;
@@ -712,10 +804,11 @@ mod tests {
             Arc::new(GraphqlResolverBridgeImpl::new(resolver));
         let dispatch: Arc<dyn DispatchBridge> =
             Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
-        let schema = GraphqlSchemaImpl::new(
+        let schema = GraphqlSchemaImpl::with_role(
             QueryRoot::new(bridge),
             MutationRoot::new(dispatch),
             SubscriptionRoot::with_source(source),
+            AuthRole::Observer,
         );
 
         let publisher_clone = Arc::clone(&publisher);
@@ -762,6 +855,106 @@ mod tests {
         assert!(
             !result.errors.is_empty(),
             "expected error for no source, got {result:?}"
+        );
+    }
+
+    // --- Authz tests -------------------------------------------------------
+
+    #[test]
+    fn auth_role_satisfies_hierarchy() {
+        assert!(AuthRole::Admin.satisfies(AuthRole::Admin));
+        assert!(AuthRole::Admin.satisfies(AuthRole::Operator));
+        assert!(AuthRole::Admin.satisfies(AuthRole::Observer));
+        assert!(AuthRole::Operator.satisfies(AuthRole::Operator));
+        assert!(AuthRole::Operator.satisfies(AuthRole::Observer));
+        assert!(!AuthRole::Operator.satisfies(AuthRole::Admin));
+        assert!(AuthRole::Observer.satisfies(AuthRole::Observer));
+        assert!(!AuthRole::Observer.satisfies(AuthRole::Operator));
+        assert!(!AuthRole::Observer.satisfies(AuthRole::Admin));
+    }
+
+    #[tokio::test]
+    async fn query_rejected_without_role() {
+        let resolver: Arc<dyn themql_core::Resolver> = Arc::new(StubResolver);
+        let bridge: Arc<dyn GraphqlResolverBridge> =
+            Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+        let dispatch: Arc<dyn DispatchBridge> =
+            Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
+        let schema = GraphqlSchemaImpl::new(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::default(),
+        );
+        let q = r#"{ resource(subject: "vehicle.sensors.imu") }"#;
+        let result = schema.schema().execute(q).await;
+        assert!(
+            !result.errors.is_empty(),
+            "expected authz error, got {result:?}"
+        );
+        assert!(result.errors[0].message.contains("no auth role"));
+    }
+
+    #[tokio::test]
+    async fn mutation_rejected_for_observer() {
+        let resolver: Arc<dyn themql_core::Resolver> = Arc::new(StubResolver);
+        let bridge: Arc<dyn GraphqlResolverBridge> =
+            Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+        let dispatch: Arc<dyn DispatchBridge> =
+            Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
+        let schema = GraphqlSchemaImpl::with_role(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::default(),
+            AuthRole::Observer,
+        );
+        let q = r#"mutation { dispatch(subject: "vehicle.command", payload: {x: 1}) }"#;
+        let result = schema.schema().execute(q).await;
+        assert!(
+            !result.errors.is_empty(),
+            "expected authz error for observer on mutation, got {result:?}"
+        );
+        assert!(result.errors[0].message.contains("insufficient role"));
+    }
+
+    #[tokio::test]
+    async fn mutation_allowed_for_admin() {
+        let resolver: Arc<dyn themql_core::Resolver> = Arc::new(StubResolver);
+        let bridge: Arc<dyn GraphqlResolverBridge> =
+            Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+        let dispatch: Arc<dyn DispatchBridge> =
+            Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
+        let schema = GraphqlSchemaImpl::with_role(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::default(),
+            AuthRole::Admin,
+        );
+        let q = r#"mutation { dispatch(subject: "vehicle.command", payload: {x: 1}) }"#;
+        let result = schema.schema().execute(q).await;
+        assert!(
+            result.errors.is_empty(),
+            "expected no authz error for admin, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_allowed_for_operator() {
+        let resolver: Arc<dyn themql_core::Resolver> = Arc::new(StubResolver);
+        let bridge: Arc<dyn GraphqlResolverBridge> =
+            Arc::new(GraphqlResolverBridgeImpl::new(resolver));
+        let dispatch: Arc<dyn DispatchBridge> =
+            Arc::new(DispatchBridgeImpl::new(Arc::new(StubHandler)));
+        let schema = GraphqlSchemaImpl::with_role(
+            QueryRoot::new(bridge),
+            MutationRoot::new(dispatch),
+            SubscriptionRoot::default(),
+            AuthRole::Operator,
+        );
+        let q = r#"{ resource(subject: "vehicle.sensors.imu") }"#;
+        let result = schema.schema().execute(q).await;
+        assert!(
+            result.errors.is_empty(),
+            "expected no authz error for operator on query, got {result:?}"
         );
     }
 }
