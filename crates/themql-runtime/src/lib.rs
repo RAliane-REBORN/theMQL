@@ -451,4 +451,109 @@ mod tests {
         assert_std_error::<Elapsed>();
         assert_std_error::<RuntimeError>();
     }
+
+    // -----------------------------------------------------------------------
+    // TokioRuntime real-impl tests (feature = "desktop")
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "desktop")]
+    mod tokio_tests {
+        use super::*;
+        use std::time::Duration;
+        use tokio::runtime::Runtime;
+
+        fn rt() -> (Runtime, TokioRuntime) {
+            let runtime = Runtime::new().expect("tokio runtime");
+            let handle = runtime.handle().clone();
+            (runtime, TokioRuntime::new(handle))
+        }
+
+        #[test]
+        fn spawn_returns_value() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let join = runtime.spawn(async { 7_u32 + 5_u32 });
+                let v = join.await.expect("spawn join");
+                assert_eq!(v, 12);
+            });
+        }
+
+        #[test]
+        fn sleep_waits_at_least_requested_duration() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let start = tokio::time::Instant::now();
+                runtime.sleep(Duration::from_millis(20)).await;
+                assert!(start.elapsed() >= Duration::from_millis(20));
+            });
+        }
+
+        #[test]
+        fn timeout_fires_when_future_is_too_slow() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let slow = runtime.sleep(Duration::from_mins(1));
+                let res = runtime.timeout(Duration::from_millis(10), slow).await;
+                assert_eq!(res, Err(Elapsed));
+            });
+        }
+
+        #[test]
+        fn timeout_succeeds_when_future_completes_in_time() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let fast = async { 42_u32 };
+                let res = runtime.timeout(Duration::from_millis(50), fast).await;
+                assert_eq!(res, Ok(42));
+            });
+        }
+
+        #[test]
+        fn channel_send_and_recv_roundtrip() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let (tx, mut rx) = runtime.channel::<u32>(4);
+                tx.send(123).await.expect("send");
+                let v = rx.recv().await.expect("recv");
+                assert_eq!(v, 123);
+            });
+        }
+
+        #[test]
+        fn cancellation_token_cancel_then_observed() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let token = runtime.cancellation();
+                assert!(!token.is_cancelled());
+                token.cancel();
+                assert!(token.is_cancelled());
+                token.cancelled().await;
+            });
+        }
+
+        #[test]
+        fn cancellation_token_cancelled_resolves_if_already_cancelled() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let token = runtime.cancellation();
+                token.cancel();
+                tokio::time::timeout(Duration::from_millis(50), token.cancelled())
+                    .await
+                    .expect("cancelled resolves immediately");
+            });
+        }
+
+        #[test]
+        fn spawn_join_error_when_task_panics() {
+            let (_guard, runtime) = rt();
+            runtime.handle().block_on(async {
+                let join = runtime.spawn(async {
+                    panic!("boom");
+                });
+                let res = join.await;
+                assert!(res.is_err());
+                assert!(res.unwrap_err().reason().contains("boom"));
+            });
+        }
+    }
 }

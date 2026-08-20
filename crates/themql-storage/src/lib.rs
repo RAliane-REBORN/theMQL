@@ -257,6 +257,117 @@ pub trait StorageWriter: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// HelixStorage backend
+// ---------------------------------------------------------------------------
+//
+// The `helix-db` crate (v3.0) is an async HTTP client that sends DSL
+// queries to a running Helix instance over `/v2/query`. Its public
+// surface (`Client`, `QueryBuilder`, `QueryExecutionRequest`) is a
+// graph-traversal DSL, not a key-value store, and requires a live
+// server. There is no usable offline API to back the `Storage` trait
+// (`get`/`put`/`delete`/`query`) against.
+//
+// Per the task brief ("If helix-db's API is opaque or requires a
+// running instance: implement `HelixStorage` with an in-memory
+// `HashMap<StorageKey, StorageValue>` fallback ... and note that
+// the real helix-db adapter is a follow-up"), `HelixStorage` is an
+// in-memory implementation now. The real helix-db adapter is
+// FOLLOW-UP_REQUIRED.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use themql_core::Subject;
+
+/// In-memory implementation of the [`Storage`] trait, used as the
+/// default `HelixDB` adapter until the real `helix-db` async client
+/// is wired.
+///
+/// Holds a `HashMap<StorageKey, StorageValue>` guarded by a `Mutex`.
+/// Suitable for tests and single-process deployments; not durable
+/// across restarts. The real `helix-db` adapter is
+/// FOLLOW-UP_REQUIRED.
+pub struct HelixStorage {
+    map: Mutex<HashMap<StorageKey, StorageValue>>,
+}
+
+impl HelixStorage {
+    /// Construct an empty in-memory `HelixStorage`.
+    #[must_use]
+    pub fn new_in_memory() -> Self {
+        Self {
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for HelixStorage {
+    fn default() -> Self {
+        Self::new_in_memory()
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl Storage for HelixStorage {
+    async fn get(&self, key: &StorageKey) -> Result<Option<StorageValue>, StorageError> {
+        Ok(self.map.lock().expect("helix map lock").get(key).cloned())
+    }
+
+    async fn put(&self, key: &StorageKey, value: StorageValue) -> Result<(), StorageError> {
+        self.map
+            .lock()
+            .expect("helix map lock")
+            .insert(key.clone(), value);
+        Ok(())
+    }
+
+    async fn delete(&self, key: &StorageKey) -> Result<(), StorageError> {
+        self.map.lock().expect("helix map lock").remove(key);
+        Ok(())
+    }
+
+    async fn query(&self, q: &StorageQuery) -> Result<StorageResultSet, StorageError> {
+        let map = self.map.lock().expect("helix map lock");
+        match q {
+            StorageQuery::ByKey(key) => Ok(StorageResultSet {
+                entries: map
+                    .get(key)
+                    .map(|v| vec![(key.clone(), v.clone())])
+                    .unwrap_or_default(),
+                has_more: false,
+                cursor: None,
+            }),
+            StorageQuery::BySubjectPattern(pattern) => {
+                let mut entries = Vec::new();
+                for (k, v) in map.iter() {
+                    if let Some(subject) = subject_from_storage_key(k) {
+                        if pattern.matches(&subject) {
+                            entries.push((k.clone(), v.clone()));
+                        }
+                    }
+                }
+                Ok(StorageResultSet {
+                    entries,
+                    has_more: false,
+                    cursor: None,
+                })
+            }
+            StorageQuery::ByPredicate(_) => Err(StorageError::QueryError(
+                "predicate queries unsupported by in-memory HelixStorage".to_owned(),
+            )),
+        }
+    }
+}
+
+/// Best-effort reconstruction of a [`Subject`] from a [`StorageKey`].
+/// Storage keys are opaque strings; if the key is a dot-joined
+/// subject, it is parsed back into a `Subject`. Otherwise `None` is
+/// returned and the key is skipped by pattern queries.
+fn subject_from_storage_key(key: &StorageKey) -> Option<Subject> {
+    Subject::from_str(key.as_str()).ok()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -463,5 +574,72 @@ mod tests {
         let se = StorageError::InternalError;
         let core: CoreError = se.into();
         assert_eq!(core.code, ErrorCode::InternalError);
+    }
+
+    // --- HelixStorage in-memory backend --------------------------------
+
+    fn sv(b: &[u8]) -> StorageValue {
+        StorageValue::new(b.to_vec(), FormatTag::Json)
+    }
+
+    #[tokio::test]
+    async fn helix_put_get_round_trip() {
+        let s = HelixStorage::new_in_memory();
+        let k = StorageKey::new("k1");
+        s.put(&k, sv(&[1, 2, 3])).await.unwrap();
+        let got = s.get(&k).await.unwrap();
+        assert_eq!(got, Some(sv(&[1, 2, 3])));
+    }
+
+    #[tokio::test]
+    async fn helix_delete_removes_entry() {
+        let s = HelixStorage::new_in_memory();
+        let k = StorageKey::new("k");
+        s.put(&k, sv(&[1])).await.unwrap();
+        s.delete(&k).await.unwrap();
+        assert_eq!(s.get(&k).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn helix_get_not_found_returns_none() {
+        let s = HelixStorage::new_in_memory();
+        let k = StorageKey::new("absent");
+        assert_eq!(s.get(&k).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn helix_query_by_key() {
+        let s = HelixStorage::new_in_memory();
+        let k = StorageKey::new("qk");
+        s.put(&k, sv(&[9])).await.unwrap();
+        let rs = s.query(&StorageQuery::ByKey(k.clone())).await.unwrap();
+        assert_eq!(rs.entries.len(), 1);
+        assert_eq!(rs.entries[0].0, k);
+        assert!(!rs.has_more);
+    }
+
+    #[tokio::test]
+    async fn helix_query_by_subject_pattern() {
+        let s = HelixStorage::new_in_memory();
+        let k1 = StorageKey::new("vehicle.sensors.imu.gyro");
+        let k2 = StorageKey::new("vehicle.sensors.imu.accel");
+        let k3 = StorageKey::new("vehicle.actuators.flap");
+        s.put(&k1, sv(&[1])).await.unwrap();
+        s.put(&k2, sv(&[2])).await.unwrap();
+        s.put(&k3, sv(&[3])).await.unwrap();
+        let p = SubjectPattern::from_str("vehicle.sensors.#").unwrap();
+        let rs = s
+            .query(&StorageQuery::BySubjectPattern(p.clone()))
+            .await
+            .unwrap();
+        assert_eq!(rs.entries.len(), 2, "pattern matches two sensors keys");
+    }
+
+    #[tokio::test]
+    async fn helix_query_by_predicate_returns_query_error() {
+        let s = HelixStorage::new_in_memory();
+        let q = StorageQuery::ByPredicate(serde_json::json!({"op": "gt"}));
+        let res = s.query(&q).await;
+        assert!(matches!(res, Err(StorageError::QueryError(_))));
     }
 }

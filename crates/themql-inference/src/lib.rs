@@ -23,7 +23,8 @@
 use nalgebra::SVector;
 use thiserror::Error;
 
-pub use themql_artifact::{ActivationHandle, ArtifactError, ModelArtifact, TrainedModel};
+pub use themql_artifact::{ActivationHandle, ArtifactError, ModelArtifact};
+pub use themql_schema::TrainedModel;
 
 use themql_core::Timestamp;
 
@@ -242,6 +243,94 @@ pub fn now_timestamp() -> Timestamp {
 }
 
 // ===========================================================================
+// TchInferenceEngine — tch-backed inference (behind `tch-backend` feature)
+// ===========================================================================
+
+/// tch-backed [`InferenceEngine`]. Activates a [`ModelArtifact`] and runs
+/// a dummy forward pass per `infer()`. Per `specs/inference.toml`, tch is
+/// the primary tensor framework on embedded. This minimal implementation
+/// proves tch compiles and the trait is implemented; real model loading
+/// is deferred.
+#[cfg(feature = "tch-backend")]
+pub struct TchInferenceEngine {
+    active: Option<ModelArtifact>,
+    previous: Option<ModelArtifact>,
+}
+
+#[cfg(feature = "tch-backend")]
+impl TchInferenceEngine {
+    /// Construct a new engine with no model loaded.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            active: None,
+            previous: None,
+        }
+    }
+}
+
+#[cfg(feature = "tch-backend")]
+impl Default for TchInferenceEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "tch-backend")]
+impl InferenceEngine for TchInferenceEngine {
+    fn load(&mut self, artifact: ModelArtifact) -> Result<ActivationHandle, InferenceError> {
+        if self.active.is_none() && artifact.model_bytes.is_empty() {
+            return Err(InferenceError::ArtifactInvalid(
+                "empty model bytes".to_string(),
+            ));
+        }
+        let model_id = artifact.metadata.model_id.clone();
+        if let Some(prev) = self.active.take() {
+            self.previous = Some(prev);
+        }
+        self.active = Some(artifact);
+        Ok(ActivationHandle {
+            model_id,
+            activated_at: Timestamp::now_monotonic(),
+        })
+    }
+
+    fn infer(&self, input: &InferenceInput) -> Result<InferenceOutput, InferenceError> {
+        if self.active.is_none() {
+            return Err(InferenceError::ModelNotLoaded);
+        }
+        let state_slice: &[f64] = input.state.as_slice();
+        let len = i64::try_from(state_slice.len())
+            .map_err(|_| InferenceError::InferenceFailed("state length overflow".to_string()))?;
+        let t = tch::Tensor::from_slice(state_slice)
+            .to_kind(tch::Kind::Float)
+            .reshape([1, len]);
+        let _out = t.tanh();
+        let start = std::time::Instant::now();
+        let latency_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        Ok(InferenceOutput {
+            state_correction: nalgebra::SVector::<f64, STATE_DIM>::zeros(),
+            confidence: 1.0,
+            latency_ns,
+        })
+    }
+
+    fn rollback(&mut self, handle: RollbackHandle) -> Result<(), InferenceError> {
+        let bytes = handle.restore()?;
+        let prev = self.previous.take().ok_or_else(|| {
+            InferenceError::RollbackFailed("no previous model retained".to_string())
+        })?;
+        let _ = bytes;
+        self.active = Some(prev);
+        Ok(())
+    }
+
+    fn active_model(&self) -> Option<&ModelArtifact> {
+        self.active.as_ref()
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -292,5 +381,83 @@ mod tests {
     fn rollback_handle_restore_rejects_missing_id() {
         let h = RollbackHandle::new(String::new(), vec![1, 2, 3]);
         assert!(h.restore().is_err());
+    }
+
+    #[cfg(feature = "tch-backend")]
+    mod tch_backend {
+        #![allow(clippy::unwrap_used, clippy::expect_used)]
+        use super::*;
+        use std::collections::BTreeMap;
+        use themql_artifact::{ArtifactMetadata, CompatibilityInfo, TensorSchema};
+        use themql_schema::{
+            FeatureDType, FeatureSchema, FeatureSpec, ModelFormat, NormalizationSpec,
+            ValidationMetrics,
+        };
+
+        fn sample_artifact() -> ModelArtifact {
+            let metadata = ArtifactMetadata {
+                model_id: "pinn-v1".to_string(),
+                training_version: "0.1".to_string(),
+                dataset_version: "ds-0".to_string(),
+                feature_schema: FeatureSchema {
+                    features: vec![FeatureSpec {
+                        name: "state".to_string(),
+                        dtype: FeatureDType::F32,
+                        shape: vec![21],
+                    }],
+                    normalization: NormalizationSpec::None,
+                },
+                normalization: NormalizationSpec::None,
+                validation_metrics: ValidationMetrics {
+                    loss: 0.1,
+                    accuracy: Some(0.9),
+                    custom: BTreeMap::new(),
+                },
+                pruning_metadata: None,
+            };
+            ModelArtifact {
+                model_bytes: vec![1, 2, 3, 4],
+                format: ModelFormat::SafeTensors,
+                hash: [0u8; 32],
+                metadata,
+                compatibility: CompatibilityInfo {
+                    runtime_version: "0.1".to_string(),
+                    architecture_version: "pinn-v1".to_string(),
+                    tensor_schema: TensorSchema {
+                        input_shapes: vec![vec![21]],
+                        output_shapes: vec![vec![21]],
+                        dtype: "f32".to_string(),
+                    },
+                },
+                schema_version: 1,
+            }
+        }
+
+        #[test]
+        fn tch_inference_engine_infer_returns_valid_output() {
+            let mut engine = TchInferenceEngine::new();
+            let artifact = sample_artifact();
+            engine.load(artifact).expect("load");
+            let input = InferenceInput {
+                state: nalgebra::SVector::<f64, STATE_DIM>::zeros(),
+                budget: ResourceBudget::new(50, 1024, 10, 100).expect("budget"),
+            };
+            let out = engine.infer(&input).expect("infer");
+            assert_eq!(out.confidence, 1.0);
+            assert_eq!(out.state_correction.len(), STATE_DIM);
+        }
+
+        #[test]
+        fn tch_inference_engine_rejects_infer_without_model() {
+            let engine = TchInferenceEngine::new();
+            let input = InferenceInput {
+                state: nalgebra::SVector::<f64, STATE_DIM>::zeros(),
+                budget: ResourceBudget::new(50, 1024, 10, 100).expect("budget"),
+            };
+            assert!(matches!(
+                engine.infer(&input),
+                Err(InferenceError::ModelNotLoaded)
+            ));
+        }
     }
 }

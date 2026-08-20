@@ -9,7 +9,6 @@ name = "themql_storage"
 path = "src/lib.rs"
 
 [dependencies]
-helix-db.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 themql-core.workspace = true
@@ -17,3 +16,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

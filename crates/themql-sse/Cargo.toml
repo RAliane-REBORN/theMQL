@@ -9,11 +9,11 @@ name = "themql_sse"
 path = "src/lib.rs"
 
 [dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
 themql-core.workspace = true
-themql-message.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }

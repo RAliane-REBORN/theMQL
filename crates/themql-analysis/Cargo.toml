@@ -12,4 +12,5 @@ path = "src/lib.rs"
 themql-core.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+polars.workspace = true
+rayon.workspace = true

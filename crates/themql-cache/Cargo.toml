@@ -10,9 +10,14 @@ path = "src/lib.rs"
 
 [dependencies]
 themql-core.workspace = true
+themql-query.workspace = true
+themql-storage.workspace = true
 thiserror.workspace = true
-blake3.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+moka = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
 serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

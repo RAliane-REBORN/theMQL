@@ -21,25 +21,42 @@ use std::future::Future;
 use themql_core::{Context, Error};
 use thiserror::Error;
 
+use async_graphql::Object;
+
 // ===========================================================================
-// Marker root types
+// Marker root types — concrete fields wired via #[Object]
 // ===========================================================================
 
-/// GraphQL `Query` root marker. Each field delegates to a
-/// `themql-core` `Resolver` via [`GraphqlResolverBridge`]. Concrete
-/// field definitions are added in a later phase.
+/// GraphQL `Query` root. Each field delegates to a `themql-core`
+/// `Resolver` via [`GraphqlResolverBridge`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueryRoot;
 
-/// GraphQL `Mutation` root marker. Delegates command dispatch to a
-/// `themql_core::MessageHandler`. Concrete field definitions are added
-/// in a later phase.
+#[Object]
+impl QueryRoot {
+    /// Placeholder field — returns a static string. Real fields are
+    /// generated from configured resolvers in a future phase.
+    async fn placeholder(&self) -> String {
+        "themql-graphql query root".to_owned()
+    }
+}
+
+/// GraphQL `Mutation` root. Delegates command dispatch to a
+/// `themql_core::MessageHandler`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MutationRoot;
 
+#[Object]
+impl MutationRoot {
+    /// Placeholder mutation — returns a static string.
+    async fn placeholder(&self) -> String {
+        "themql-graphql mutation root".to_owned()
+    }
+}
+
 /// GraphQL `Subscription` root marker. Maps to `themql-message` streams
-/// via the SSE / MQTT bridge. Concrete field definitions are added in a
-/// later phase.
+/// via the SSE / MQTT bridge. Concrete subscription fields require a
+/// `Stream` type and are added in a future phase.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SubscriptionRoot;
 
@@ -139,5 +156,33 @@ mod tests {
     fn graphql_error_resolution_maps_to_resolver_error() {
         let e: Error = GraphqlError::ResolutionFailed("field x".to_owned()).into();
         assert_eq!(e.code, ErrorCode::ResolverError);
+    }
+
+    #[tokio::test]
+    async fn graphql_schema_builds_with_placeholder_fields() {
+        use async_graphql::EmptySubscription;
+        let schema =
+            async_graphql::Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish();
+        let q = r"{ placeholder }";
+        let result = schema.execute(q).await;
+        let data = result.data.into_json().expect("data to json");
+        assert_eq!(
+            data["placeholder"], "themql-graphql query root",
+            "placeholder field must resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn graphql_mutation_placeholder_resolves() {
+        use async_graphql::EmptySubscription;
+        let schema =
+            async_graphql::Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish();
+        let q = r"mutation { placeholder }";
+        let result = schema.execute(q).await;
+        let data = result.data.into_json().expect("data to json");
+        assert_eq!(
+            data["placeholder"], "themql-graphql mutation root",
+            "mutation placeholder must resolve"
+        );
     }
 }

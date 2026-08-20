@@ -2,9 +2,10 @@
 //!
 //! Validated transfer of trained models from desktop training to embedded
 //! inference. Owns the canonical `ModelArtifact`, `ArtifactMetadata`,
-//! `ValidationReport`, `RuntimeInfo`, `ActivationHandle` types and the
+//! `ValidationReport`, `RuntimeInfo`, `ActivationHandle` types. The
 //! `FeatureSchema` / `FeatureSpec` / `FeatureDType` / `NormalizationSpec`
-//! schema types re-exported by `themql-training` and `themql-inference`.
+//! / `ModelFormat` / `ValidationMetrics` / `TrainedModel` schema types
+//! are owned by `themql-schema` and re-exported here.
 //!
 //! See `specs/model_artifact.toml` for the authoritative specification.
 //!
@@ -20,104 +21,19 @@
 #![warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![warn(missing_docs)]
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use themql_core::{Error, Timestamp};
 
-// ===========================================================================
-// Model format
-// ===========================================================================
-
-/// Serialisation format of the model bytes inside a `ModelArtifact`.
-///
-/// Re-exported canonically from this crate; `themql-training` selects the
-/// format at export time, `themql-inference` must support it at import time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelFormat {
-    /// `TorchScript` serialised graph.
-    TorchScript,
-    /// `SafeTensors` layout.
-    SafeTensors,
-    /// `ONNX` graph.
-    Onnx,
-}
+// Re-export the shared schema types so downstream crates can depend on
+// themql-artifact alone for all artifact-related types.
+pub use themql_schema::{
+    FeatureDType, FeatureSchema, FeatureSpec, ModelFormat, NormalizationSpec, TrainedModel,
+    ValidationMetrics,
+};
 
 // ===========================================================================
-// Feature schema — canonical schema types for training + inference
+// Pruning metadata
 // ===========================================================================
-
-/// Element data type for a feature tensor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FeatureDType {
-    /// 32-bit float.
-    F32,
-    /// 64-bit float.
-    F64,
-    /// 32-bit signed integer.
-    I32,
-    /// 64-bit signed integer.
-    I64,
-}
-
-/// A single named feature with shape and dtype.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeatureSpec {
-    /// Feature name.
-    pub name: String,
-    /// Per-dimension sizes; a scalar is `vec![]`.
-    pub shape: Vec<usize>,
-    /// Element type.
-    pub dtype: FeatureDType,
-}
-
-/// The full input feature schema of a model. Re-exported by
-/// `themql-training` (producer) and `themql-inference` (consumer).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeatureSchema {
-    /// Ordered input features.
-    pub features: Vec<FeatureSpec>,
-}
-
-/// Normalisation applied to a feature before inference. Re-exported by
-/// `themql-training` and `themql-inference` so both sides agree on the
-/// exact transform.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NormalizationSpec {
-    /// No normalisation — raw input passed through.
-    None,
-    /// `(x - mean) / std` per element.
-    Standard {
-        /// Per-element mean.
-        mean: Vec<f64>,
-        /// Per-element standard deviation.
-        std: Vec<f64>,
-    },
-    /// `x / max_abs`.
-    MaxAbs {
-        /// Per-element maximum absolute value.
-        max_abs: Vec<f64>,
-    },
-}
-
-// ===========================================================================
-// Training-side metadata
-// ===========================================================================
-
-/// Validation metrics captured at training time. Carried in
-/// `ArtifactMetadata` so the embedded side can refuse a regression.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ValidationMetrics {
-    /// Final training loss.
-    pub loss: f64,
-    /// Optional top-1 accuracy.
-    pub accuracy: Option<f64>,
-    /// Free-form custom metrics keyed by name.
-    pub custom: BTreeMap<String, f64>,
-}
 
 /// Pruning metadata. `None` if the model was not pruned.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +45,10 @@ pub struct PruningMetadata {
     /// Achieved sparsity fraction in `[0.0, 1.0]`.
     pub achieved_sparsity: f32,
 }
+
+// ===========================================================================
+// Tensor + compatibility info
+// ===========================================================================
 
 /// Tensor shapes describing the model's input and output contracts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +72,10 @@ pub struct CompatibilityInfo {
     pub tensor_schema: TensorSchema,
 }
 
+// ===========================================================================
+// ArtifactMetadata
+// ===========================================================================
+
 /// Full metadata carried alongside a `ModelArtifact`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactMetadata {
@@ -169,24 +93,6 @@ pub struct ArtifactMetadata {
     pub validation_metrics: ValidationMetrics,
     /// Pruning metadata, if the model was pruned.
     pub pruning_metadata: Option<PruningMetadata>,
-}
-
-// ===========================================================================
-// Trained model — canonical producer-side type
-// ===========================================================================
-
-/// A trained model awaiting artifact packaging. Defined canonically here
-/// per `specs/model_artifact.toml`; `themql-training` re-exports it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrainedModel {
-    /// Raw model bytes.
-    pub model_bytes: Vec<u8>,
-    /// Serialisation format of `model_bytes`.
-    pub format: ModelFormat,
-    /// Input feature schema.
-    pub feature_schema: FeatureSchema,
-    /// Validation metrics from training.
-    pub validation_metrics: ValidationMetrics,
 }
 
 // ===========================================================================
@@ -453,6 +359,7 @@ impl ArtifactValidator for HashValidator {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use std::collections::BTreeMap;
 
     fn sample_metadata() -> ArtifactMetadata {
         ArtifactMetadata {
@@ -462,9 +369,10 @@ mod tests {
             feature_schema: FeatureSchema {
                 features: vec![FeatureSpec {
                     name: "state".to_string(),
-                    shape: vec![21],
                     dtype: FeatureDType::F32,
+                    shape: vec![21],
                 }],
+                normalization: NormalizationSpec::None,
             },
             normalization: NormalizationSpec::None,
             validation_metrics: ValidationMetrics {

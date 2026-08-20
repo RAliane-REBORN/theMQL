@@ -24,6 +24,8 @@
 use std::fmt;
 use std::future::Future;
 
+use serde::{Deserialize, Serialize};
+
 // Re-exports — canonical types live in themql_core; re-exported here so
 // downstream code can depend on themql-query alone for query concerns.
 // The `QueryExecutor` trait is declared in themql_core per spec (so
@@ -45,7 +47,7 @@ pub use themql_core::{
 /// [api.CacheKey.derivation]`, the projection is **not** part of the key
 /// — the same selection may be projected differently by different
 /// callers without splitting the cache.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CacheKey {
     /// 32-byte blake3 digest of the canonical key material.
     hash: [u8; 32],
@@ -59,6 +61,18 @@ impl CacheKey {
     #[must_use]
     pub fn from_hash(hash: [u8; 32]) -> Self {
         Self { hash }
+    }
+
+    /// Construct a `CacheKey` by hashing the given input with BLAKE3.
+    ///
+    /// Convenience method for cache tier implementations that need to
+    /// derive a key from raw bytes without going through a
+    /// [`CacheKeyer`].
+    #[must_use]
+    pub fn hash_of(input: &[u8]) -> Self {
+        Self {
+            hash: blake3::hash(input).into(),
+        }
     }
 
     /// The raw 32-byte digest.

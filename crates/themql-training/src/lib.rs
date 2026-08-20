@@ -16,12 +16,17 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::BTreeMap;
 use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 
 use themql_core::{Error, ErrorCode};
+
+pub use themql_artifact::ArtifactMetadata;
+pub use themql_schema::{
+    FeatureDType, FeatureSchema, FeatureSpec, ModelFormat, NormalizationSpec, TrainedModel,
+    ValidationMetrics,
+};
 
 // ===========================================================================
 // TrainerKind
@@ -39,59 +44,6 @@ pub enum TrainerKind {
     GradientBoosting,
     /// Fine tuning of an existing model.
     FineTuning,
-}
-
-// ===========================================================================
-// Feature schema (defined locally; re-exportable from themql-artifact
-// when that crate grows a real implementation)
-// ===========================================================================
-
-/// Element type of a feature column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FeatureDType {
-    /// 32-bit float.
-    F32,
-    /// 64-bit float.
-    F64,
-    /// 64-bit signed integer.
-    I64,
-    /// Boolean.
-    Bool,
-}
-
-/// Specification of a single feature column.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeatureSpec {
-    /// Column name.
-    pub name: String,
-    /// Element dtype.
-    pub dtype: FeatureDType,
-    /// Per-axis shape (empty for scalars).
-    pub shape: Vec<usize>,
-}
-
-/// Normalisation strategy applied to a feature column.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NormalizationSpec {
-    /// No normalisation.
-    None,
-    /// Standard (z-score) normalisation.
-    Standard,
-    /// Min-max scaling to `[0,1]`.
-    MinMax,
-    /// Custom named normalisation.
-    Custom(String),
-}
-
-/// Schema describing the features of a `Dataset` or `TrainedModel`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeatureSchema {
-    /// One spec per feature column.
-    pub features: Vec<FeatureSpec>,
-    /// Normalisation applied to the features.
-    pub normalization: NormalizationSpec,
 }
 
 // ===========================================================================
@@ -194,47 +146,6 @@ pub struct TrainingConfig {
 }
 
 // ===========================================================================
-// TrainedModel + ModelFormat + ValidationMetrics
-// ===========================================================================
-
-/// Serialisation format of the trained model bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelFormat {
-    /// `TorchScript` serialised model.
-    TorchScript,
-    /// `SafeTensors` serialised model.
-    SafeTensors,
-    /// `ONNX` serialised model.
-    Onnx,
-}
-
-/// Metrics from the validation pass of a trained model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ValidationMetrics {
-    /// Final validation loss.
-    pub loss: f64,
-    /// Optional top-1 accuracy.
-    pub accuracy: Option<f64>,
-    /// Optional named custom metrics.
-    pub custom: BTreeMap<String, f64>,
-}
-
-/// The model produced by a [`Trainer`]. Handed to
-/// `themql-artifact::ArtifactWriter` for validation + serialisation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TrainedModel {
-    /// Serialised model bytes (`TorchScript` / `safetensors` / `onnx`).
-    pub model_bytes: Vec<u8>,
-    /// Serialisation format of `model_bytes`.
-    pub format: ModelFormat,
-    /// Feature schema the model was trained against.
-    pub feature_schema: FeatureSchema,
-    /// Validation metrics from the final epoch.
-    pub validation_metrics: ValidationMetrics,
-}
-
-// ===========================================================================
 // Trainer trait
 // ===========================================================================
 
@@ -255,6 +166,89 @@ pub trait Trainer: Send + Sync {
 
     /// Returns the trainer variant.
     fn kind(&self) -> TrainerKind;
+}
+
+// ===========================================================================
+// TchTrainer — tch-backed trainer (behind `tch-backend` feature)
+// ===========================================================================
+
+/// tch-backed [`Trainer`]. Performs a placeholder training loop that
+/// proves tch compiles and can create tensors. Per `specs/training.toml`,
+/// tch is the primary tensor framework on desktop. Real training is
+/// deferred.
+#[cfg(feature = "tch-backend")]
+pub struct TchTrainer {
+    kind: TrainerKind,
+}
+
+#[cfg(feature = "tch-backend")]
+impl TchTrainer {
+    /// Construct a new `TchTrainer` for the given trainer `kind`.
+    #[must_use]
+    pub fn new(kind: TrainerKind) -> Self {
+        Self { kind }
+    }
+}
+
+#[cfg(feature = "tch-backend")]
+impl Trainer for TchTrainer {
+    fn train(
+        &self,
+        dataset: &Dataset,
+        _config: &TrainingConfig,
+    ) -> impl Future<Output = Result<TrainedModel, TrainingError>> {
+        use std::collections::BTreeMap;
+        let n_rows = dataset.features.len();
+        let n_cols = dataset.features.first().map(|r| r.len()).unwrap_or(0);
+        let res = (|| -> Result<TrainedModel, TrainingError> {
+            if n_rows == 0 || n_cols == 0 {
+                return Err(TrainingError::DatasetInvalid("empty dataset".to_owned()));
+            }
+            let rows_i64 = i64::try_from(n_rows)
+                .map_err(|_| TrainingError::DatasetInvalid("row count overflow".to_owned()))?;
+            let cols_i64 = i64::try_from(n_cols)
+                .map_err(|_| TrainingError::DatasetInvalid("col count overflow".to_owned()))?;
+            let flat: Vec<f32> = dataset
+                .features
+                .iter()
+                .flat_map(|r| r.iter().map(|v| *v as f32))
+                .collect();
+            let _t = tch::Tensor::from_slice(&flat)
+                .to_kind(tch::Kind::Float)
+                .reshape([rows_i64, cols_i64]);
+            let zeros = tch::Tensor::zeros(
+                [rows_i64, cols_i64.max(1)],
+                (tch::Kind::Float, tch::Device::Cpu),
+            );
+            let _out = zeros.tanh();
+            let model_bytes: Vec<u8> = (0u32..16).flat_map(|i| i.to_le_bytes()).collect();
+            let feature_schema = FeatureSchema {
+                features: (0..n_cols)
+                    .map(|i| FeatureSpec {
+                        name: format!("f{i}"),
+                        dtype: FeatureDType::F32,
+                        shape: vec![],
+                    })
+                    .collect(),
+                normalization: NormalizationSpec::None,
+            };
+            Ok(TrainedModel {
+                model_bytes,
+                format: ModelFormat::TorchScript,
+                feature_schema,
+                validation_metrics: ValidationMetrics {
+                    loss: 0.0,
+                    accuracy: None,
+                    custom: BTreeMap::new(),
+                },
+            })
+        })();
+        std::future::ready(res)
+    }
+
+    fn kind(&self) -> TrainerKind {
+        self.kind
+    }
 }
 
 // ===========================================================================
@@ -400,5 +394,99 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: SparsificationStrategy = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[cfg(feature = "tch-backend")]
+    mod tch_backend {
+        #![allow(clippy::unwrap_used, clippy::expect_used)]
+        use super::*;
+
+        #[test]
+        fn tch_tensor_creation() {
+            let t = tch::Tensor::zeros(&[10, 5], (tch::Kind::Float, tch::Device::Cpu));
+            assert_eq!(t.size(), vec![10, 5]);
+            assert!(t.sum(tch::Kind::Float).double_value(&[]).abs() < 1e-12);
+        }
+
+        #[test]
+        fn tch_trainer_train_produces_non_empty_model_bytes() {
+            let trainer = TchTrainer::new(TrainerKind::Dense);
+            let dataset = Dataset {
+                features: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+                labels: vec![vec![0.0], vec![1.0]],
+                feature_schema: FeatureSchema {
+                    features: vec![
+                        FeatureSpec {
+                            name: "x".to_owned(),
+                            dtype: FeatureDType::F32,
+                            shape: vec![],
+                        },
+                        FeatureSpec {
+                            name: "y".to_owned(),
+                            dtype: FeatureDType::F32,
+                            shape: vec![],
+                        },
+                    ],
+                    normalization: NormalizationSpec::None,
+                },
+            };
+            let cfg = TrainingConfig {
+                kind: TrainerKind::Dense,
+                epochs: 1,
+                batch_size: 2,
+                learning_rate: 1e-3,
+                weight_decay: None,
+                early_stopping: None,
+                pruning: None,
+                sparsification: None,
+            };
+            let model = futures_block_on(trainer.train(&dataset, &cfg)).expect("train");
+            assert!(!model.model_bytes.is_empty());
+            assert_eq!(model.format, ModelFormat::TorchScript);
+        }
+
+        #[test]
+        fn tch_trainer_rejects_empty_dataset() {
+            let trainer = TchTrainer::new(TrainerKind::Dense);
+            let dataset = Dataset {
+                features: vec![],
+                labels: vec![],
+                feature_schema: FeatureSchema {
+                    features: vec![],
+                    normalization: NormalizationSpec::None,
+                },
+            };
+            let cfg = TrainingConfig {
+                kind: TrainerKind::Dense,
+                epochs: 1,
+                batch_size: 2,
+                learning_rate: 1e-3,
+                weight_decay: None,
+                early_stopping: None,
+                pruning: None,
+                sparsification: None,
+            };
+            assert!(futures_block_on(trainer.train(&dataset, &cfg)).is_err());
+        }
+
+        fn futures_block_on<F: std::future::Future>(fut: F) -> F::Output {
+            use std::future::Future;
+            use std::pin::Pin;
+            use std::sync::Arc;
+            use std::task::{Context, Poll, Wake, Waker};
+
+            struct NoopWake;
+            impl Wake for NoopWake {
+                fn wake(self: Arc<Self>) {}
+            }
+            let waker = Waker::from(Arc::new(NoopWake));
+            let mut cx = Context::from_waker(&waker);
+            let mut fut = Box::pin(fut);
+            loop {
+                if let Poll::Ready(v) = Future::poll(Pin::as_mut(&mut fut), &mut cx) {
+                    return v;
+                }
+            }
+        }
     }
 }

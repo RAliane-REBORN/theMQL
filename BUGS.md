@@ -29,13 +29,38 @@ line + date + commit/PR reference when fixed.
 
 ## Resolved bugs
 
-(none)
+### BUG-0007: themql-cache / themql-storage workspace compile breakage (pre-existing)
+
+- Discovered: 2026-08-20 (during Phase 2 Stages 6-8 turn; pre-existing
+  in the working tree before the turn began, confirmed via `git stash`)
+- Severity: blocker (for `cargo check --workspace` only)
+- Subsystem: themql-cache, themql-storage
+- Status: resolved
+- Symptom: `cargo check --workspace` fails with 3 errors in
+  `themql-cache/src/lib.rs` around `.await` on a non-future
+  (`self.promote(key, &entry_for_promote, CacheTier::L4).await`).
+- Expected: `cargo check --workspace` passes for all 20 crates.
+- Reproduction: `cargo check --workspace`.
+- Root cause: uncommitted changes in `themql-cache/Cargo.toml`,
+  `themql-cache/src/lib.rs`, `themql-storage/Cargo.toml`,
+  `themql-storage/src/lib.rs` (1939 lines added across 5 files) that were
+  in the working tree before the Phase 2 Stages 6-8 turn. NOT introduced
+  by Stages 6-8 (which only touch themql-runtime, themql-desktop,
+  themql-embedded).
+- Fix: resolved 2026-08-20 (Phase 2 Stages 2-9 turn). The cache/storage
+  changes were completed and integrated; `cargo check --workspace`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo test --workspace` all pass clean (240 tests).
+- Follow-up: none.
 
 ## Known limitations (not bugs, but tracked alongside)
 
-These are spec-acknowledged gaps / v0.1 placeholders, not bugs. Phase 1 is
-complete: all 19 crates have real `src/` content (traits + types + error
-types + unit tests), 184 tests pass, full validation green.
+These are spec-acknowledged gaps / v0.1 placeholders, not bugs. Phase 2
+Stages 1-11 are complete: all 20 crates have real `src/` content,
+cache/storage/transport backends wired, runtime impls + desktop/embedded
+binary wiring, analysis/training/inference heavy-dep wiring, cross-crate
+type reconciliation, and safety-critical tooling installed. 240 tests
+pass workspace-wide (default features). Full validation green.
 
 ### Safety-critical placeholders (MUST address before deployment)
 
@@ -50,63 +75,57 @@ types + unit tests), 184 tests pass, full validation green.
   updates apply simplified scalar-gain covariance shrinkage), NOT full
   nonlinear quaternion dynamics + Jacobian-based Kalman gain. State
   estimation is NOT flight-ready. Tracked as a limitation, not a bug.
-- **`themql-inference` no tch-backed impl** — the `InferenceEngine` trait
-  is defined but has no concrete tch-backed implementation; `tch` was
-  deliberately not added to avoid the libtorch build dependency in this
-  environment. A tch impl is a future task. Tracked as a limitation, not a
-  bug.
 - **`themql-runtime` EmbassyRuntime sleep stub** — the embedded runtime's
   sleep is a stub; embassy 0.10 `Spawner` is not `Send`/`Sync` so the
   `EmbeddedRuntime` trait was relaxed from the spec. Confirm before
   relying on the embedded runtime in flight. Tracked as a limitation.
 
+### Environment constraints (not bugs)
+
+- **`tch-backend` feature tests not run** — `themql-training` and
+  `themql-inference` define `tch-backend` features wiring `tch` with
+  `download-libtorch`. The feature compiles clean, but tests
+  (`TchTrainer`, `TchInferenceEngine`) are not run in this environment
+  due to libtorch download size + RAM constraints (7.8GB RAM, no swap;
+  polars-core alone OOM-kills rustc without `CARGO_PROFILE_DEV_DEBUG=0`).
+  The default-feature tests pass. Tracked as a limitation.
+
 ### Cross-cutting follow-ups (not bugs)
 
-- **CacheKey duplication** — `CacheKey` is defined locally in
-  `themql-cache` (32-byte BLAKE3). `themql-query` also defines a
-  `CacheKey` + `CacheKeyer` trait. The two key types must be reconciled
-  — do not duplicate the key type silently. Tracked as a follow-up.
+- **CacheKey duplication — RESOLVED** — `CacheKey` is now re-exported
+  from `themql-query` in `themql-cache` per `specs/cache.toml`. The
+  `themql-query` version was enriched with `Serialize`/`Deserialize`
+  derives + `hash_of()` method.
+- **Local type stubs — RESOLVED** — `themql-training` and
+  `themql-artifact` now re-export shared schema types from
+  `themql-schema` (20th crate). No more local duplicate definitions of
+  `FeatureSchema`/`ModelFormat`/`ValidationMetrics`/`TrainedModel`.
 - **`serde-big-array` dependency** — added to workspace.dependencies for
   serializing the 21x21 covariance `[f64; 441]` in themql-telemetry.
   Reassess if a more idiomatic serde path emerges.
-- **Local type stubs in dependent crates** — `themql-training` /
-  `themql-analysis` define `FeatureSchema`/`ModelFormat`/
-  `ValidationMetrics`/`Dataset` locally because the canonical owners
-  (`themql-artifact`, `themql-telemetry`) now exist; switch the local
-  definitions to re-exports. Tracked as a follow-up.
 
-### Deferred heavy deps (not bugs)
+### Stub backends (not bugs)
 
-- `themql-training`/`themql-analysis`/`themql-desktop`/`themql-embedded`
-  defer heavy deps (tch, polars, dioxus, ratatui, embassy) — traits +
-  minimal types only per the Phase 1 task brief. Concrete impls are future
-  tasks.
-
-### No concrete backends wired (not bugs)
-
-- `themql-cache`, `themql-transport`, `themql-storage` define only the
-  trait + type + error surface (per their specs). No concrete backends are
-  wired yet: cachelito (L1), moka (L2), valkey (L3), helix-db (L4 storage),
-  and the MQTT/GraphQL/SSE transport adapters are all unimplemented. The
-  traits are ready for implementations to compose behind.
-- `helix-db` v3.0.0 compiles cleanly in this environment and is listed as
-  a dep of `themql-storage`, but is intentionally not imported in `lib.rs`
-  — the `Storage` trait is backend-agnostic and the L4 adapter lands in a
-  later phase.
+- `themql-cache` L1 (cachelito API mismatch — `HashMap` fallback used),
+  L3 (valkey alpha driver lacks `DEL`/`EXPIRE`/binary — returns
+  `TierUnavailable`), and `themql-storage` L4 (helix-db needs live server
+  — in-memory `HashMap` fallback used). Real adapters are future tasks.
+- `invalidate_pattern` in `TieredCache` is best-effort (no
+  key→subject index yet — effectively a no-op for L1/L2).
 
 ### Tooling / CI (not bugs)
 
-- No CI guard script yet. The architectural invariant "crate names in
-  specs match workspace members" is currently enforced only by manual
-  review.
-- No `opencode.json`. The OpenCode-specific config file is not yet written;
-  `AGENTS.md` exists as the agent convention file.
-- `mold`, `sccache`, `cargo-deny`, `cargo-machete`, `cargo-bloat` not
-  installed in this environment. Config files (`deny.toml`,
-  `.cargo/config.toml`, `TETANUS.md`) are ready for when they are.
-  Install: `apt install mold`, `cargo install sccache cargo-deny
-  cargo-machete cargo-bloat`. Then uncomment the relevant lines in
-  `.cargo/config.toml`.
+- `cargo-deny`, `cargo-machete`, `cargo-bloat` installed and passing.
+  `cargo deny check` passes (BSL-1.0 + CDLA-Permissive-2.0 added to
+  allowed licenses). `cargo machete --with-metadata` clean (11 unused
+  deps removed). `cargo bloat` passes on desktop binary.
+- `opencode.json` written with `$schema`, `instructions: ["AGENTS.md"]`,
+  permission rules, and `validate` + `safety-gate` custom commands.
+- `scripts/ci_guard.py` checks TOML parse + crate-name-vs-workspace
+  invariant. All checks pass.
+- `mold`, `sccache` not installed. Config files (`.cargo/config.toml`)
+  are ready for when they are. Install: `apt install mold`,
+  `cargo install sccache`. Then uncomment the relevant lines.
 - No fuzzing harness, no dependency-audit pipeline, no secret-management
   policy. Tracked in `SECURITY.md` known limitations.
 

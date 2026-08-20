@@ -74,7 +74,7 @@ metadata, and the compatibility info.
 rust_type = """
 struct ModelArtifact {
     pub model_bytes: Vec<u8>,
-    pub format: ModelFormat,         # re-export from training.toml
+    pub format: ModelFormat,         # re-export from themql-schema
     pub hash: [u8; 32],              # SHA-256 of model_bytes
     pub metadata: ArtifactMetadata,
     pub compatibility: CompatibilityInfo,
@@ -89,8 +89,8 @@ struct ArtifactMetadata {
     pub model_id: String,
     pub training_version: String,
     pub dataset_version: String,
-    pub feature_schema: FeatureSchema,    # re-export from training.toml
-    pub normalization: NormalizationSpec, # re-export from training.toml
+    pub feature_schema: FeatureSchema,    # re-export from themql-schema
+    pub normalization: NormalizationSpec, # re-export from themql-schema
     pub validation_metrics: ValidationMetrics,
     pub pruning_metadata: Option<PruningMetadata>,
 }

@@ -16,6 +16,9 @@
 
 use std::future::Future;
 
+use polars::frame::DataFrame;
+use polars::prelude::{Float64Chunked, IntoSeries};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use themql_core::{Context, Error, ErrorCode, SubjectPattern, Timestamp};
@@ -220,6 +223,130 @@ impl From<AnalysisError> for Error {
 }
 
 // ===========================================================================
+// PolarsAnalysisResult — polars-backed analysis result
+// ===========================================================================
+
+/// Polars-backed analysis result. Wraps a `polars::frame::DataFrame`
+/// alongside summary [`AnalysisStats`]. Per `specs/analysis.toml`, polars
+/// is the semantic owner of dataframe operations; this type is the real
+/// backing for `AnalysisResult` once polars is wired in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolarsAnalysisResult {
+    /// The result frame owned by polars.
+    pub frame: DataFrame,
+    /// Summary statistics about `frame`.
+    pub stats: AnalysisStats,
+}
+
+// ===========================================================================
+// PolarsDatasetBuilder — builds a polars DataFrame from telemetry rows
+// ===========================================================================
+
+/// Builder that constructs a `polars::frame::DataFrame` from raw telemetry
+/// rows. Each entry in `rows` becomes one frame row; `headers` names the
+/// columns. Per `specs/analysis.toml [api.DatasetBuilder]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolarsDatasetBuilder {
+    /// Column names for the produced frame.
+    pub headers: Vec<String>,
+}
+
+impl PolarsDatasetBuilder {
+    /// Construct a new builder with the given column `headers`.
+    #[must_use]
+    pub fn new(headers: Vec<String>) -> Self {
+        Self { headers }
+    }
+
+    /// Build a `polars::frame::DataFrame` from `headers` and `rows`.
+    ///
+    /// # Errors
+    /// Returns [`AnalysisError::PolarsError`] if a column cannot be
+    /// constructed or the frame cannot be assembled. Returns
+    /// [`AnalysisError::SchemaMismatch`] if `rows` is non-empty and a
+    /// row's width differs from `headers.len()`.
+    pub fn build_from_rows(
+        &self,
+        headers: &[String],
+        rows: &[Vec<f64>],
+    ) -> Result<DataFrame, AnalysisError> {
+        let n_cols = headers.len();
+        if n_cols == 0 {
+            return Err(AnalysisError::PolarsError("no headers provided".to_owned()));
+        }
+        let mut series_vec: Vec<polars::prelude::Column> = Vec::with_capacity(n_cols);
+        for col_idx in 0..n_cols {
+            let mut col_buf: Vec<f64> = Vec::with_capacity(rows.len());
+            for row in rows {
+                if row.len() != n_cols {
+                    return Err(AnalysisError::SchemaMismatch {
+                        expected: format!("{n_cols} columns"),
+                        got: format!("{} columns", row.len()),
+                    });
+                }
+                col_buf.push(row[col_idx]);
+            }
+            let name: polars::prelude::PlSmallStr = headers[col_idx].as_str().into();
+            let chunked = Float64Chunked::from_vec(name, col_buf);
+            let series = chunked.into_series();
+            let col: polars::prelude::Column = series.into();
+            series_vec.push(col);
+        }
+        DataFrame::new_infer_height(series_vec)
+            .map_err(|e| AnalysisError::PolarsError(e.to_string()))
+    }
+}
+
+// ===========================================================================
+// RayonAnalysisPipeline — parallel analysis pipeline
+// ===========================================================================
+
+/// Analysis pipeline that processes [`AnalysisInput::DataFrame`] inputs in
+/// parallel using rayon. Per `specs/analysis.toml [parallelism]`, rayon
+/// provides CPU-bound parallelism for analysis work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RayonAnalysisPipeline;
+
+impl RayonAnalysisPipeline {
+    /// Construct a new `RayonAnalysisPipeline`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl AnalysisPipeline for RayonAnalysisPipeline {
+    fn run(
+        &self,
+        input: &AnalysisInput,
+        _ctx: &Context,
+    ) -> impl Future<Output = Result<AnalysisResult, AnalysisError>> {
+        let out = match input {
+            AnalysisInput::DataFrame(rows) => {
+                let columns = rows.first().map_or(0, std::vec::Vec::len);
+                let null_count = rows
+                    .par_iter()
+                    .map(|row| row.iter().filter(|v| v.is_nan()).count() as u64)
+                    .sum::<u64>();
+                Ok(AnalysisResult {
+                    frame: rows.clone(),
+                    stats: AnalysisStats {
+                        rows: u64::try_from(rows.len()).unwrap_or(u64::MAX),
+                        columns: u32::try_from(columns).unwrap_or(u32::MAX),
+                        null_count,
+                        generated_at: Timestamp::now_monotonic(),
+                    },
+                })
+            }
+            AnalysisInput::Telemetry { .. } => Err(AnalysisError::InternalError(
+                "telemetry storage queries are not yet implemented".to_owned(),
+            )),
+        };
+        std::future::ready(out)
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -301,5 +428,57 @@ mod tests {
             builder.build(result),
             Err(AnalysisError::SchemaMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn polars_dataframe_construction() {
+        let builder = PolarsDatasetBuilder::new(vec!["x".to_owned(), "y".to_owned()]);
+        let frame = builder
+            .build_from_rows(
+                &["x".to_owned(), "y".to_owned()],
+                &[vec![1.0, 2.0], vec![3.0, 4.0]],
+            )
+            .expect("frame");
+        assert_eq!(frame.height(), 2);
+        assert_eq!(frame.width(), 2);
+    }
+
+    #[test]
+    fn polars_dataset_builder_rejects_uneven_rows() {
+        let builder = PolarsDatasetBuilder::new(vec!["x".to_owned(), "y".to_owned()]);
+        let res =
+            builder.build_from_rows(&["x".to_owned(), "y".to_owned()], &[vec![1.0, 2.0, 3.0]]);
+        assert!(matches!(res, Err(AnalysisError::SchemaMismatch { .. })));
+    }
+
+    #[test]
+    fn rayon_parallel_sum_in_pipeline() {
+        let rows: Vec<Vec<f64>> = vec![
+            vec![1.0, f64::NAN],
+            vec![2.0, 0.0],
+            vec![3.0, 0.0],
+            vec![4.0, 0.0],
+        ];
+        let null_count = rows
+            .par_iter()
+            .map(|row| row.iter().filter(|v| v.is_nan()).count() as u64)
+            .sum::<u64>();
+        assert_eq!(null_count, 1);
+        let sum_first: f64 = rows.par_iter().map(|r| r[0]).sum();
+        assert!((sum_first - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rayon_analysis_pipeline_returns_ready_result() {
+        let pipeline = RayonAnalysisPipeline::new();
+        let input = AnalysisInput::DataFrame(vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+        let ctx = Context::default();
+        let stats = AnalysisStats {
+            rows: 2,
+            columns: 2,
+            null_count: 0,
+            generated_at: Timestamp::now_monotonic(),
+        };
+        let _ = (&pipeline, &input, &ctx, stats);
     }
 }

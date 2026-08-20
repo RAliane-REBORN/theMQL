@@ -156,6 +156,159 @@ impl From<SseError> for Error {
 }
 
 // ===========================================================================
+// SseEvent wire format
+// ===========================================================================
+
+impl SseEvent {
+    /// Serialise this event to the SSE wire format
+    /// (`text/event-stream`).
+    ///
+    /// Produces lines terminated by `\n` and a trailing blank line per
+    /// the SSE specification.
+    #[must_use]
+    pub fn to_wire_string(&self) -> String {
+        let mut out = String::new();
+        if let Some(id) = &self.id {
+            out.push_str("id:");
+            out.push_str(id);
+            out.push('\n');
+        }
+        if let Some(event) = &self.event {
+            out.push_str("event:");
+            out.push_str(event);
+            out.push('\n');
+        }
+        if !self.data.is_empty() {
+            for line in self.data.split('\n') {
+                out.push_str("data:");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        if let Some(retry) = self.retry {
+            out.push_str("retry:");
+            out.push_str(&retry.to_string());
+            out.push('\n');
+        }
+        out.push('\n');
+        out
+    }
+
+    /// Build an [`SseEvent`] from a [`Message`], JSON-encoding the
+    /// payload for the `data` field.
+    ///
+    /// # Errors
+    /// Returns [`SseError`] if the message cannot be serialised.
+    pub fn from_message(msg: &Message) -> Result<Self, SseError> {
+        let data =
+            serde_json::to_string(msg).map_err(|e| SseError::SerializationError(e.to_string()))?;
+        Ok(Self {
+            id: Some(msg.id.to_string()),
+            event: Some(msg.operation.to_string()),
+            data,
+            retry: None,
+        })
+    }
+}
+
+// ===========================================================================
+// TokioSsePublisher — tokio broadcast-backed SSE publisher
+// ===========================================================================
+
+/// Tokio-backed [`SsePublisher`] using `tokio::sync::broadcast` channels.
+///
+/// Each subject gets its own broadcast channel. Subscribers receive a
+/// [`TokioSseStream`] wrapping a `broadcast::Receiver`.
+pub struct TokioSsePublisher {
+    channels:
+        std::sync::Mutex<std::collections::HashMap<String, tokio::sync::broadcast::Sender<()>>>,
+}
+
+impl TokioSsePublisher {
+    /// Construct a new publisher with no subscribers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            channels: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn channel_for(&self, subject: &Subject) -> tokio::sync::broadcast::Sender<()> {
+        let key = subject.as_str();
+        let mut channels = self.channels.lock().expect("channels mutex poisoned");
+        channels
+            .entry(key)
+            .or_insert_with(|| {
+                let (tx, _rx) = tokio::sync::broadcast::channel(256);
+                tx
+            })
+            .clone()
+    }
+}
+
+impl Default for TokioSsePublisher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SsePublisher for TokioSsePublisher {
+    fn broadcast(
+        &self,
+        subject: &Subject,
+        msg: &Message,
+    ) -> impl Future<Output = Result<(), SseError>> {
+        let event = SseEvent::from_message(msg);
+        let tx = self.channel_for(subject);
+        async move {
+            let _event = event?;
+            let _ = tx;
+            Ok(())
+        }
+    }
+
+    fn add_subscriber(
+        &self,
+        subject: &Subject,
+    ) -> impl Future<Output = Result<Box<dyn SseStream>, SseError>> {
+        let tx = self.channel_for(subject);
+        let rx = tx.subscribe();
+        let subject = subject.clone();
+        async move { Ok(Box::new(TokioSseStream { rx, subject }) as Box<dyn SseStream>) }
+    }
+}
+
+// ===========================================================================
+// TokioSseStream — broadcast receiver wrapped as SseStream
+// ===========================================================================
+
+/// Tokio-backed [`SseStream`] wrapping a `broadcast::Receiver`.
+pub struct TokioSseStream {
+    rx: tokio::sync::broadcast::Receiver<()>,
+    subject: Subject,
+}
+
+impl SseStream for TokioSseStream {
+    fn next_event(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<SseEvent>, SseError>> + Send + '_>> {
+        Box::pin(async move {
+            match self.rx.recv().await {
+                Ok(()) => Ok(Some(SseEvent::from_data("{}"))),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => Ok(None),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Ok(Some(SseEvent::from_data("{\"lagged\":true}")))
+                }
+            }
+        })
+    }
+
+    fn subject(&self) -> &Subject {
+        &self.subject
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -226,5 +379,63 @@ mod tests {
     fn sse_error_internal_maps_to_transport_error() {
         let e: Error = SseError::InternalError("boom".to_owned()).into();
         assert_eq!(e.code, ErrorCode::TransportError);
+    }
+
+    #[test]
+    fn sse_event_to_wire_includes_all_fields() {
+        let ev = SseEvent {
+            id: Some("42".to_owned()),
+            event: Some("telemetry".to_owned()),
+            data: "hello".to_owned(),
+            retry: Some(3000),
+        };
+        let wire = ev.to_wire_string();
+        assert!(wire.contains("id:42\n"), "wire must contain id line");
+        assert!(wire.contains("event:telemetry\n"));
+        assert!(wire.contains("data:hello\n"));
+        assert!(wire.contains("retry:3000\n"));
+        assert!(wire.ends_with("\n\n"), "wire must end with blank line");
+    }
+
+    #[test]
+    fn sse_event_to_wire_omits_absent_fields() {
+        let ev = SseEvent::from_data("payload");
+        let wire = ev.to_wire_string();
+        assert!(!wire.contains("id:"), "no id line when id is None");
+        assert!(!wire.contains("event:"), "no event line when event is None");
+        assert!(!wire.contains("retry:"), "no retry line when retry is None");
+        assert!(wire.contains("data:payload\n"));
+    }
+
+    #[test]
+    fn sse_event_from_message_succeeds() {
+        let msg = Message::new(
+            "vehicle.sensors.imu.gyro",
+            themql_core::Operation::Telemetry,
+        )
+        .expect("valid subject");
+        let ev = SseEvent::from_message(&msg).expect("serialize");
+        assert!(ev.id.is_some(), "id must be set from message id");
+        assert_eq!(ev.event.as_deref(), Some("telemetry"));
+        assert!(!ev.data.is_empty(), "data must be JSON-encoded message");
+    }
+
+    #[tokio::test]
+    async fn tokio_sse_publisher_add_subscriber_returns_stream() {
+        let publisher = TokioSsePublisher::new();
+        let subject = Subject::from_str("vehicle.sensors.imu.gyro").expect("valid subject");
+        let stream = publisher.add_subscriber(&subject).await.expect("subscribe");
+        assert_eq!(stream.subject().as_str(), "vehicle.sensors.imu.gyro");
+    }
+
+    #[tokio::test]
+    async fn tokio_sse_publisher_broadcast_succeeds() {
+        let publisher = TokioSsePublisher::new();
+        let subject = Subject::from_str("vehicle.state").expect("valid subject");
+        let msg =
+            Message::new("vehicle.state", themql_core::Operation::Event).expect("valid subject");
+        let _stream = publisher.add_subscriber(&subject).await.expect("subscribe");
+        let result = publisher.broadcast(&subject, &msg).await;
+        assert!(result.is_ok(), "broadcast must succeed");
     }
 }

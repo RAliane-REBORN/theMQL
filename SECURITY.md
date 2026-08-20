@@ -140,9 +140,9 @@ Before a change touches anything in `themql-transport`, `themql-graphql`,
 - Does it introduce unbounded channels or blocking work on the async
   executor? (must not)
 
-## Known limitations (as of v0.1, 2026-08-20, Phase 1 complete)
+## Known limitations (as of v0.1, 2026-08-20, Phase 2 Stages 1-11 complete)
 
-All 19 crates now have real `src/` content (traits + types + error types +
+All 20 crates now have real `src/` content (traits + types + error types +
 unit tests). The four safety-critical crates (themql-gnc, themql-estimation,
 themql-inference, themql-artifact) comply with TETANUS.md (Power of Ten
 rules): `#![forbid(unsafe_code)]`, `#![deny(warnings)]`, `clippy::pedantic`,
@@ -177,22 +177,30 @@ functions <= 60 lines, >= 2 assertions per public function as
   is a stub; embassy 0.10 `Spawner` is not `Send`/`Sync` so the
   `EmbeddedRuntime` trait was relaxed from the spec. Confirm before
   relying on the embedded runtime in flight.
-- No formal security review process yet.
 - No fuzzing harness.
-- No dependency audit pipeline (cargo-deny not installed; config ready).
+- No dependency audit pipeline beyond `cargo deny check` (installed and
+  passing). `cargo machete` clean. `cargo bloat` passes.
 - No secret-management policy for HelixDB / Valkey credentials.
 - No transport-layer authn/authz policy (MQTT broker credentials, GraphQL
-  access control). These land in Phase 4 with the transport implementations.
-- `themql-cache`, `themql-transport`, `themql-storage` define only traits +
-  types + error types (per their specs). No concrete backends are wired, so
-  there is no live cache/storage/transport attack surface yet — but when
-  backends land, the trait boundary is where access control, credential
-  handling, and input validation must be enforced. The traits themselves
-  carry no authn/authz; that is the responsibility of the concrete adapter
-  implementations and the `Context.principal` carried through `themql-core`.
-- Heavy deps (tch, polars, dioxus, ratatui, embassy) are deferred in
-  training/analysis/desktop/embedded — those crates define traits + minimal
-  types only, so no live ML/UI/analysis attack surface yet.
+  access control). These land in Phase 4 with the real transport
+  implementations. The SSE/MQTT/GraphQL adapters now prove the trait
+  surface compiles with heavy deps (tokio, async-graphql, serde_json)
+  but do not perform real network I/O — so no live attack surface yet.
+- `themql-cache`, `themql-storage` now have concrete backends wired
+  (L1 HashMap, L2 moka, L3 valkey stub, HelixStorage in-memory), but
+  the valkey/helix-db stubs return `TierUnavailable`/in-memory only —
+  no live networked cache/storage attack surface yet. When real valkey
+  L3 and helix-db L4 land, the trait boundary is where access control,
+  credential handling, and input validation must be enforced.
+- `tch` is wired behind a `tch-backend` feature gate in
+  themql-training/themql-inference. The feature compiles clean but tests
+  are not run in this environment (libtorch + RAM). No live ML attack
+  surface yet (TchTrainer/TchInferenceEngine are placeholder loops).
+- `polars` + `rayon` are wired into themql-analysis. No live analysis
+  attack surface yet (RayonAnalysisPipeline runs a trivial parallel
+  null-count).
+- `themql-schema` is a pure type-definition crate with no I/O, no
+  network, no unsafe code. No attack surface.
 
 These limitations are tracked; they are not open invitations to land
 insecure defaults when the corresponding code is written.

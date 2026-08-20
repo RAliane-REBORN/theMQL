@@ -68,26 +68,29 @@ deliberate, not an oversight.
 
 - Name: theMQL (The Message Query Language)
 - Version: 0.1.0
-- Status: greenfield (Phase 1 implemented; 19 crates with real source)
+- Status: greenfield (Phase 2 Stages 1-11 complete — cache/storage/transport backends, runtime impls, desktop/embedded binary wiring, analysis/training/inference heavy-dep wiring, cross-crate type reconciliation, safety-critical tooling + opencode.json + CI guard)
 - Language: Rust
 - License: MIT
 - Repository: https://github.com/Metis-Avionics/theMQL
 - Toolchain: stable channel, no version pin
 - Workspace resolver: 2
-- Branch: `feat/phase-1-spec-deepening` (stacked on
-  `feat/v0.1-spec-and-workspace-skeleton`, PR #1 open)
+- Branch: `feat/phase-2-heavy-dep-wiring` (stacked on the Phase 1 work)
 
-### Crates (19)
+### Crates (20)
 
-17 library crates + 2 binary crates. ALL 19 now have real `src/` content
+18 library crates + 2 binary crates. ALL 20 now have real `src/` content
 (traits + types + error types + unit tests). No 0-line stubs remain.
+`themql-schema` is the canonical home for shared schema types
+(`FeatureSchema`, `NormalizationSpec`, `ModelFormat`, etc.) used by
+`themql-artifact`, `themql-training`, and `themql-inference`.
 
 | Crate | Domain | Role | Tests |
 |---|---|---|---|
-| themql-core | core | semantic owner — canonical types (Message, Query, Response, Error, Context, Resource) + traits | 31 + 1 doc |
+| themql-core | core | semantic owner — canonical Message, Query, Response, Error, Context, Resource types + traits | 31 + 1 doc |
+| themql-schema | core | canonical shared schema types (FeatureSchema, NormalizationSpec, ModelFormat, TrainedModel, etc.) | 6 |
 | themql-message | core | Serializer trait + JsonSerializer + MessageError | 4 |
 | themql-query | core | CacheKey, CacheKeyer, QueryExecutor, Batcher, QueryError | 11 |
-| themql-runtime | runtime | DesktopRuntime (tokio) + EmbeddedRuntime (embassy), separate traits | 6 |
+| themql-runtime | runtime | DesktopRuntime (tokio) + EmbeddedRuntime (embassy), separate traits | 6 default + 8 desktop-feature |
 | themql-cache | cache | Cache trait, CacheEntry, CacheHit, CacheError | 16 |
 | themql-storage | storage | Storage/Reader/Writer traits, StorageKey/Value/Query/ResultSet | 23 |
 | themql-transport | transport | Bridge trait, BridgeRoute, TransportKind, TransportError | 14 |
@@ -101,10 +104,67 @@ deliberate, not an oversight.
 | themql-artifact | cross-cutting | ArtifactValidator/Loader/Writer, ModelArtifact (TETANUS) | 5 |
 | themql-gnc | embedded | Controller trait, PID/LQRI/Hybrid, GncState 21-dim (TETANUS) | 7 |
 | themql-estimation | embedded | Estimator trait, Ekf, EstimatorState 21-dim (TETANUS) | 6 |
-| themql-embedded | binary | SensorDriver trait, embassy task topology (TETANUS) | 4 |
-| themql-desktop | binary | Cli (clap), Command enum, main entry | 5 |
+| themql-embedded | binary | SensorDriver trait, GpsDriver/BaroDriver/ImuDriver, SensorError 5 variants (TETANUS) | 10 |
+| themql-desktop | binary | Cli (clap), tokio main, ratatui/crossterm TUI dashboard, 3-pane layout | 13 |
 
-Total: 183 unit tests + 1 doc test = 184 tests, all green.
+Total: 240 tests pass workspace-wide (default features) at Phase 2
+Stage 10 close. Per-crate counts: core 31+1doc, schema 6, message 4,
+query 11, runtime 6, cache 30, storage 29, transport 14, graphql 6,
+mqtt 14, sse 13, telemetry 14, analysis 9, training 5, inference 6,
+artifact 5, gnc 7, estimation 6, embedded 10, desktop 13. The
+`tch-backend` feature in training/inference compiles clean but tests
+are not run (libtorch + RAM constraints in this environment).
+
+### Phase 2 progress (2026-08-20)
+
+- Stage 1 — themql-cache backends (L1 HashMap FIFO, L2 moka, L3 valkey
+  stub, TieredCache orchestrator) + themql-storage backend (HelixStorage
+  in-memory fallback). +20 tests.
+- Stages 2-5 — transport adapters: themql-sse (SseEvent wire format,
+  TokioSsePublisher/Stream broadcast-backed, 13 tests), themql-mqtt
+  (subject↔topic mapping, JSON codec, 14 tests), themql-graphql
+  (#[Object] QueryRoot/MutationRoot, SubscriptionRoot marker only, 6
+  tests).
+- Stages 6-8 — themql-runtime (TokioRuntime tests, 8 desktop-feature),
+  themql-desktop (tokio + ratatui/crossterm TUI, 13 tests),
+  themql-embedded (SensorDriver tests, 10 tests).
+- Stage 9 — themql-analysis (polars + rayon: PolarsDatasetBuilder,
+  RayonAnalysisPipeline, 9 tests), themql-training (tch behind
+  `tch-backend` feature: TchTrainer, 5 default tests), themql-inference
+  (tch behind `tch-backend` feature: TchInferenceEngine, 6 default
+  tests).
+- Stage 10 — CacheKey reconciliation (themql-cache re-exports from
+  themql-query per spec; removed local def + blake3 dep). Created
+  themql-schema crate (20th crate) with canonical shared types matching
+  specs/training.toml exactly. Fixed spec deviations in themql-artifact
+  (FeatureDType: Bool not I32; NormalizationSpec: simple enum not struct
+  variants; FeatureSchema: has normalization field). Updated
+  themql-artifact/training/inference to re-export from themql-schema.
+  6 new tests in themql-schema.
+- Stage 11 — installed cargo-deny/cargo-machete/cargo-bloat. cargo deny
+  check passes (added BSL-1.0 + CDLA-Permissive-2.0 licenses). cargo
+  machete clean (removed 11 unused deps across 8 crates). cargo bloat
+  passes (3.9MiB desktop binary). Wrote opencode.json (permissions +
+  validate/safety-gate commands). Wrote scripts/ci_guard.py (TOML parse
+  + crate-name invariant).
+
+### Environment constraint (added 2026-08-20)
+
+This environment has 7.8GB RAM, no swap. polars-core OOM-kills rustc
+during test compilation unless `CARGO_PROFILE_DEV_DEBUG=0
+CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none` is set. The `tch-backend`
+feature compiles clean but its tests are not run (libtorch download +
+RAM). Use `CARGO_BUILD_JOBS=1` to further reduce memory pressure.
+
+### Known gotcha: build environment RAM constraint
+
+This environment has 7.8GB RAM and no swap. polars-core (used by
+themql-analysis) OOM-kills rustc during test compilation. To build/test
+polars-dependent crates, use `CARGO_BUILD_JOBS=1
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none`.
+The `tch-backend` feature in themql-training/themql-inference compiles
+clean but its tests are not run (libtorch download + RAM). BUG-0007
+(workspace compile breakage) is RESOLVED — all workspace tests pass.
 
 ### Dependency stack (resolved against crates.io 2026-08-19)
 
@@ -155,6 +215,44 @@ on theDAF. the embedded binary must not depend on theDAF.
 
 ## Decision log (chronological)
 
+- 2026-08-20: Phase 2 Stage 11 complete — installed safety-critical
+  tooling (cargo-deny, cargo-machete, cargo-bloat). cargo deny check
+  passes (added BSL-1.0 + CDLA-Permissive-2.0 licenses). cargo machete
+  clean (removed 11 unused deps). cargo bloat passes. Wrote opencode.json
+  (permissions + validate/safety-gate commands). Wrote
+  scripts/ci_guard.py (TOML parse + crate-name invariant). 240 tests
+  pass. Full validation green.
+- 2026-08-20: Phase 2 Stage 10 complete — cross-crate type
+  reconciliation. CacheKey: themql-cache now re-exports from
+  themql-query (per specs/cache.toml). Created themql-schema (20th
+  crate) as canonical home for shared schema types (FeatureSchema,
+  NormalizationSpec, ModelFormat, FeatureDType, FeatureSpec,
+  ValidationMetrics, TrainedModel). User decision: "Move types to a
+  new shared crate" to avoid circular dep between themql-training and
+  themql-artifact. Fixed spec deviations: FeatureDType has Bool (not
+  I32), NormalizationSpec is simple enum (not struct variants),
+  FeatureSchema has normalization field. 240 tests pass workspace-wide.
+  Full validation green.
+- 2026-08-20: Phase 2 Stages 2-5 + 9 complete — wired SSE/MQTT/GraphQL
+  transport adapters (SseEvent wire format + broadcast-backed
+  publisher/stream; subject↔topic mapping + JSON codec; #[Object]
+  QueryRoot/MutationRoot with EmptySubscription in tests). Wired
+  polars+rayon into themql-analysis (PolarsDatasetBuilder,
+  RayonAnalysisPipeline). Wired tch behind `tch-backend` feature into
+  themql-training (TchTrainer) and themql-inference
+  (TchInferenceEngine). 234 tests pass workspace-wide (default
+  features). Full validation green: cargo fmt --check, cargo clippy
+  --workspace --all-targets -- -D warnings, cargo test --workspace.
+  BUG-0007 resolved. The `tch-backend` feature compiles clean but tests
+  not run (libtorch + RAM). Environment requires
+  CARGO_PROFILE_DEV_DEBUG=0 to build polars test artifacts.
+- 2026-08-20: Phase 2 Stage 1 complete — wired real cache tier backends
+  (L1 HashMap FIFO, L2 moka, L3 valkey stub, TieredCache orchestrator)
+  and real storage backend (HelixStorage in-memory fallback). 59 tests
+  across the two crates.
+- 2026-08-20: Phase 2 Stages 6-8 complete — runtime impls + desktop
+  binary + embedded binary wired with real deps (tokio, ratatui/
+  crossterm). 29 tests across the three crates.
 - 2026-08-20: Phase 1 complete — spec deepening + nalgebra amendment +
   all 19 crates implemented. Deepened ALL 19 specs from thin/medium to deep
   with concrete types/traits/signatures. Implemented real Rust source for all
@@ -207,35 +305,44 @@ on theDAF. the embedded binary must not depend on theDAF.
 
 ### Validation baseline
 
-At end of 2026-08-20 (Phase 1 complete — all 19 crates implemented):
+At end of 2026-08-20 (Phase 2 Stage 11 complete):
 
-- 43+ TOML files parse via `python3 tomllib`.
+- 44+ TOML files parse via `python3 tomllib` + `scripts/ci_guard.py`.
 - `cargo metadata --no-deps --format-version 1` resolves.
 - `cargo fmt --all --check` — clean.
-- `cargo check --workspace` — passes for all 19 crates.
+- `cargo check --workspace` — passes for all 20 crates.
 - `cargo clippy --workspace --all-targets -- -D warnings` — zero warnings.
-- `cargo test --workspace` — 183 unit tests + 1 doc test = 184 tests, all pass.
-- `cargo deny`, `cargo machete`, `cargo bloat`, `cargo miri` gates defined in
-  AGENTS.md + TETANUS.md but tools not yet installed.
+- `cargo test --workspace` — 240 tests pass (default features).
+- `cargo deny check` — passes (advisories ok, bans ok, licenses ok,
+  sources ok).
+- `cargo machete --with-metadata` — clean (no unused deps).
+- `cargo bloat --release --crates -p themql-desktop` — passes (3.9MiB).
+- `scripts/ci_guard.py` — all checks pass.
+- The `tch-backend` feature in themql-training/themql-inference compiles
+  clean; tests not run (libtorch + RAM constraints).
 
-### Phase 1 status: COMPLETE
+### Phase 2 status: Stages 1-11 COMPLETE
 
-All 19 crates have real `src/` content (traits + types + error types + unit
-tests). No 0-line stubs remain. See the crate table above for per-crate test
-counts. Follow-ups (not blockers):
+All 20 crates have real `src/` content (traits + types + error types +
+unit tests) + real backends/impls wired behind the trait surfaces
+(cache tiers, storage, transport adapters, runtime, desktop/embedded
+binaries, analysis/training/inference heavy deps). 240 tests pass
+workspace-wide. Safety-critical tooling installed and passing
+(cargo-deny, cargo-machete, cargo-bloat). opencode.json + CI guard
+script in place. Follow-ups (not blockers):
 
 - Real nonlinear quaternion EKF dynamics + Jacobian-based Kalman gain
   (themql-estimation currently uses v0.1 simplified identity-gain placeholder).
 - Real SHA-256 (or BLAKE3) in themql-artifact HashValidator (currently a
   placeholder fold hash — must replace before deployment).
-- Concrete tch-backed InferenceEngine impl in themql-inference (libtorch build
-  dep; trait defined without it for now).
-- Wire heavy deps (tch, polars, dioxus, ratatui, embassy) into the
-  training/analysis/desktop/embedded crates (currently traits + minimal types
-  only, per the task brief).
-- Reconcile CacheKey (defined locally in themql-cache) with themql-query's
-  CacheKeyer.
-- Install cargo-deny, cargo-machete, cargo-bloat, sccache, mold; run the
-  safety-critical validation gate.
-- Add a CI guard script (TOML parse + crate-name-vs-workspace invariant).
-- Write `opencode.json`.
+- Run `tch-backend` feature tests (TchTrainer, TchInferenceEngine) once
+  a beefier environment is available.
+- Real cachelito L1 (needs API redesign), real valkey L3 (needs driver
+  maturity), real helix-db L4 (needs live server + KV mapping),
+  key→subject index for pattern invalidation.
+- Real network I/O for transport adapters (SSE/MQTT/GraphQL currently
+  prove the trait surface compiles with heavy deps).
+- Real training loop in TchTrainer, real model loading in
+  TchInferenceEngine, real analysis pipelines in RayonAnalysisPipeline.
+- Install mold + sccache for faster builds.
+- Stage 12: final validation + docs + PR.

@@ -141,6 +141,50 @@ impl From<MqttError> for Error {
 }
 
 // ===========================================================================
+// Subject ↔ MQTT topic mapping
+// ===========================================================================
+
+use themql_core::SubjectError;
+
+/// Convert a [`Subject`] to an MQTT topic string.
+///
+/// Per `specs/mqtt.toml [mapping]`, the themql-core Subject maps 1:1 to
+/// the MQTT topic string — both are hierarchical and dot-separated, so
+/// the mapping is identity.
+#[must_use]
+pub fn subject_to_topic(subject: &Subject) -> String {
+    subject.as_str()
+}
+
+/// Parse an MQTT topic string into a [`Subject`].
+///
+/// # Errors
+/// Returns [`SubjectError`] if the topic is not a valid concrete subject.
+pub fn topic_to_subject(topic: &str) -> Result<Subject, SubjectError> {
+    Subject::from_str(topic)
+}
+
+// ===========================================================================
+// Message encode / decode
+// ===========================================================================
+
+/// Encode a [`Message`] into MQTT publish payload bytes (JSON).
+///
+/// # Errors
+/// Returns [`MqttError`] if serialisation fails.
+pub fn encode_message(msg: &Message) -> Result<Vec<u8>, MqttError> {
+    serde_json::to_vec(msg).map_err(|e| MqttError::DeserializationError(e.to_string()))
+}
+
+/// Decode MQTT publish payload bytes (JSON) back into a [`Message`].
+///
+/// # Errors
+/// Returns [`MqttError`] if deserialisation fails.
+pub fn decode_message(bytes: &[u8]) -> Result<Message, MqttError> {
+    serde_json::from_slice(bytes).map_err(|e| MqttError::DeserializationError(e.to_string()))
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -204,5 +248,37 @@ mod tests {
     fn mqtt_error_timeout_maps_to_transport_error() {
         let e: Error = MqttError::Timeout.into();
         assert_eq!(e.code, ErrorCode::TransportError);
+    }
+
+    #[test]
+    fn subject_to_topic_is_identity() {
+        let subject = Subject::from_str("vehicle.sensors.imu.gyro").expect("valid subject");
+        assert_eq!(subject_to_topic(&subject), "vehicle.sensors.imu.gyro");
+    }
+
+    #[test]
+    fn topic_to_subject_round_trips() {
+        let topic = "vehicle.actuators.fins.fin1";
+        let subject = topic_to_subject(topic).expect("valid topic");
+        assert_eq!(subject.as_str(), topic);
+    }
+
+    #[test]
+    fn topic_to_subject_rejects_wildcard() {
+        assert!(topic_to_subject("vehicle.+.sensors").is_err());
+    }
+
+    #[test]
+    fn encode_decode_message_round_trips() {
+        let msg = Message::new("vehicle.state", themql_core::Operation::Telemetry)
+            .expect("valid subject");
+        let bytes = encode_message(&msg).expect("encode");
+        let back = decode_message(&bytes).expect("decode");
+        assert_eq!(msg, back, "round-trip must preserve the message");
+    }
+
+    #[test]
+    fn decode_message_rejects_garbage() {
+        assert!(decode_message(b"not json").is_err());
     }
 }

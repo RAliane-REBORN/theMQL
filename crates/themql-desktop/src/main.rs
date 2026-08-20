@@ -5,17 +5,24 @@
 //! this binary composes all desktop-capable crates and exposes a CLI,
 //! TUI, and Dioxus UI.
 //!
-//! This is a stub implementation: it parses the CLI and dispatches to
-//! `println!` placeholders. The actual server, training, analysis,
-//! telemetry, and TUI implementations are future tasks. Heavy
-//! dependencies (dioxus, ratatui, tokio, polars, tch) are deferred.
+//! This implementation wires a tokio `#[tokio::main]` entry point, clap
+//! CLI dispatch with placeholder prints, and a ratatui/crossterm TUI
+//! dashboard with three labelled panes (telemetry stream, state
+//! estimate, controller state). The actual server, training, analysis,
+//! and telemetry work is a future task; the dispatch here prints the
+//! chosen command so the wiring is observable end-to-end.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use std::process::ExitCode;
+use std::io;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use ratatui::crossterm::event::{self, Event, KeyCode};
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Style, Stylize};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 /// Desktop CLI. Mirrors `specs/desktop.toml [api.Cli]`.
 #[derive(Debug, Clone, Parser)]
@@ -129,30 +136,91 @@ fn dispatch(command: &Command) -> Result<(), themql_core::Error> {
             println!("themql-desktop: telemetry subject={}", args.subject);
         }
         Command::Tui => {
-            println!("themql-desktop: tui (not implemented)");
+            println!("themql-desktop: launching TUI");
+            if let Err(e) = tui_main() {
+                eprintln!("themql-desktop: tui error: {e}");
+            }
         }
     }
     Ok(())
 }
 
-/// Desktop entry point. Parses the CLI and dispatches to the chosen
-/// subcommand. Per `specs/desktop.toml [entry]`, the canonical form
-/// uses a tokio `DesktopRuntime`; this stub uses synchronous dispatch
-/// because tokio is deferred.
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match dispatch(&cli.command) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
+/// Ratatui/crossterm TUI dashboard. Three labelled panes per
+/// `specs/desktop.toml [api.TuiLayout]`: telemetry stream (top), state
+/// estimate + covariance (middle), controller state + actuator commands
+/// (bottom). Loops reading key events; quits on `q` or `Esc`.
+///
+/// # Errors
+/// Returns the underlying `io::Error` if terminal init, draw, or event
+/// read fails.
+fn tui_main() -> io::Result<()> {
+    let mut terminal = ratatui::init();
+    loop {
+        terminal.draw(draw_dashboard)?;
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
+                    break;
+                }
+            }
         }
     }
+    ratatui::restore();
+    Ok(())
+}
+
+/// Draw the three-pane dashboard layout. Each pane is a labelled,
+/// bordered block; contents are placeholders pending real telemetry
+/// wiring.
+fn draw_dashboard(frame: &mut ratatui::Frame<'_>) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Min(1),
+        ])
+        .split(frame.area());
+
+    let telemetry = Block::default()
+        .borders(Borders::ALL)
+        .title("Telemetry stream")
+        .bold();
+    frame.render_widget(telemetry, chunks[0]);
+
+    let state_estimate = Block::default()
+        .borders(Borders::ALL)
+        .title("State estimate + covariance")
+        .bold();
+    frame.render_widget(state_estimate, chunks[1]);
+
+    let controller_state = Block::default()
+        .borders(Borders::ALL)
+        .title("Controller state + actuator commands")
+        .bold();
+    frame.render_widget(controller_state, chunks[2]);
+
+    let hint = Paragraph::new("press q to quit")
+        .right_aligned()
+        .style(Style::new().dim().underlined());
+    frame.render_widget(hint, chunks[0]);
+}
+
+/// Desktop entry point. Parses the CLI and dispatches to the chosen
+/// subcommand. Per `specs/desktop.toml [entry]`, the canonical form
+/// uses a tokio `DesktopRuntime`; here we run under a tokio
+/// multi-thread runtime so async commands compose naturally.
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    dispatch(&cli.command)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn cli_parses_serve_subcommand() {
@@ -195,6 +263,45 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_analyze_subcommand() {
+        let cli = Cli::parse_from(["themql-desktop", "analyze", "--input", "x.csv"]);
+        match cli.command {
+            Command::Analyze(args) => assert_eq!(args.input, "x.csv"),
+            _ => panic!("must parse Analyze subcommand"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_validate_subcommand() {
+        let cli = Cli::parse_from(["themql-desktop", "validate", "--artifact", "m.tar"]);
+        match cli.command {
+            Command::Validate(args) => assert_eq!(args.artifact, "m.tar"),
+            _ => panic!("must parse Validate subcommand"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_telemetry_subcommand() {
+        let cli = Cli::parse_from(["themql-desktop", "telemetry"]);
+        match cli.command {
+            Command::Telemetry(args) => assert_eq!(args.subject, "vehicle.#"),
+            _ => panic!("must parse Telemetry subcommand"),
+        }
+    }
+
+    #[test]
+    fn cli_help_contains_expected_strings() {
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("themql-desktop"));
+        assert!(help.contains("serve"));
+        assert!(help.contains("analyze"));
+        assert!(help.contains("train"));
+        assert!(help.contains("validate"));
+        assert!(help.contains("telemetry"));
+        assert!(help.contains("tui"));
+    }
+
+    #[test]
     fn dispatch_serve_prints_port() {
         let args = ServeArgs {
             bind: "127.0.0.1".to_owned(),
@@ -205,7 +312,44 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_tui_succeeds() {
-        dispatch(&Command::Tui).unwrap();
+    fn dispatch_analyze_succeeds() {
+        dispatch(&Command::Analyze(AnalyzeArgs {
+            input: "in.csv".to_owned(),
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_train_succeeds() {
+        dispatch(&Command::Train(TrainArgs {
+            dataset: "d.parquet".to_owned(),
+            kind: "dense".to_owned(),
+            epochs: 1,
+            output: "o.tar".to_owned(),
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_validate_succeeds() {
+        dispatch(&Command::Validate(ValidateArgs {
+            artifact: "a.tar".to_owned(),
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_telemetry_succeeds() {
+        dispatch(&Command::Telemetry(TelemetryArgs {
+            subject: "vehicle.state_estimate".to_owned(),
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn draw_dashboard_runs_with_test_backend() {
+        let backend = ratatui::backend::TestBackend::new(40, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(draw_dashboard).unwrap();
     }
 }

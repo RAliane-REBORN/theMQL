@@ -8,8 +8,13 @@ license.workspace = true
 name = "themql_inference"
 path = "src/lib.rs"
 
+[features]
+tch-backend = ["dep:tch"]
+
 [dependencies]
 themql-core.workspace = true
 themql-artifact.workspace = true
+themql-schema.workspace = true
 nalgebra.workspace = true
 thiserror.workspace = true
+tch = { workspace = true, optional = true, features = ["download-libtorch"] }

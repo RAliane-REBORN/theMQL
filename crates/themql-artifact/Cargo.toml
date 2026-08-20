@@ -12,4 +12,5 @@ path = "src/lib.rs"
 serde.workspace = true
 serde_json.workspace = true
 themql-core.workspace = true
+themql-schema.workspace = true
 thiserror.workspace = true
