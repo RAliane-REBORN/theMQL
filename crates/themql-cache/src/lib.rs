@@ -711,7 +711,11 @@ impl<S: Storage> Cache for TieredCache<S> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::duration_suboptimal_units)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::duration_suboptimal_units
+    )]
     use super::*;
     use themql_core::{ErrorCode, ResponseValue};
 

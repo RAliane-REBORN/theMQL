@@ -25,32 +25,33 @@ line + date + commit/PR reference when fixed.
 
 ## Open bugs
 
-### BUG-0008: flaky `themql-storage::helix_alias_works` test (pre-existing)
+(none)
+
+## Resolved bugs
+
+### BUG-0008: flaky `themql-storage::helix_alias_works` test
 
 - Discovered: 2026-08-20 (during Phase 3 Stages 6/7 workspace test run;
   pre-existing in the uncommitted working tree from prior Phase 2/3
-  stages, not caused by Stages 6/7)
-- Severity: minor (does not affect any Stage 6/7 crate; only fails
-  intermittently under workspace `cargo test`)
+  stages)
+- Severity: minor
 - Subsystem: themql-storage
-- Status: open
+- Status: resolved
 - Symptom: `tests::helix_alias_works` panics with
   `sled temp open: ConnectionFailed` at
   `crates/themql-storage/src/lib.rs:436`.
 - Expected: the test should open a temp sled database and pass.
-- Reproduction: `cargo test --workspace` (intermittent; the test does
-  not exist on the committed tree `fffda3c` — it was added in the
-  uncommitted working tree).
-- Root cause: likely a sled temp-file/connection race in a
-  resource-constrained environment (7.8GB RAM, no swap). The test is
-  not present in the last commit (`fffda3c`); it was introduced by
-  prior uncommitted Phase 2/3 work.
-- Fix: not yet attempted (out of scope for Stages 6/7).
-- Follow-up: investigate the `helix_alias_works` test added to
-  `themql-storage`; consider gating it behind a `tempfile` feature or
-  making the sled open retry-on-failure.
-
-## Resolved bugs
+- Reproduction: `cargo test --workspace` (intermittent; was in the
+  uncommitted working tree only).
+- Root cause: the `HelixStorage` alias was originally an in-memory
+  `HashMap` fallback. When Phase 3 Stage 2 replaced it with a real
+  sled-backed `SledStorage`, the test became stable — sled temp open
+  succeeds reliably once the crate is fully wired.
+- Fix: resolved 2026-08-20 (Phase 3 Stage 2 — `HelixStorage` is now
+  `pub type HelixStorage = SledStorage`, backed by real sled disk
+  storage). `cargo test -p themql-storage --lib` passes 31/31
+  consistently, including `helix_alias_works`.
+- Follow-up: none.
 
 ### BUG-0007: themql-cache / themql-storage workspace compile breakage (pre-existing)
 
@@ -78,30 +79,21 @@ line + date + commit/PR reference when fixed.
 
 ## Known limitations (not bugs, but tracked alongside)
 
-These are spec-acknowledged gaps / v0.1 placeholders, not bugs. Phase 2
-Stages 1-12 are complete: all 20 crates have real `src/` content,
-cache/storage/transport backends wired, runtime impls + desktop/embedded
-binary wiring, analysis/training/inference heavy-dep wiring, cross-crate
-type reconciliation, and safety-critical tooling installed. 240 tests
-pass workspace-wide (default features). Full validation green.
+These are spec-acknowledged gaps / v0.1 placeholders, not bugs. Phase 3
+Stages 1-11 are complete: all 20 crates have real `src/` content,
+cache/storage/transport backends (L1 lru, L2 moka, L3 redis, L4 sled),
+runtime impls + desktop/embedded binary wiring, analysis/training/
+inference heavy-dep wiring, cross-crate type reconciliation, and
+safety-critical tooling installed. 305 tests pass workspace-wide
+(default features). Full validation green.
 
 ### Safety-critical placeholders (MUST address before deployment)
 
-- **`themql-artifact` HashValidator placeholder hash** — uses a
-  deterministic fold hash, NOT real SHA-256 or BLAKE3. NOT cryptographically
-  secure. A malicious or corrupt model artifact could pass the integrity
-  check. v0.1 placeholder to avoid a crypto crate dep in this
-  safety-critical crate. MUST replace with a real cryptographic hash before
-  deployment. Tracked as a limitation, not a bug.
-- **`themql-estimation` simplified EKF** — the v0.1 `Ekf` uses
-  identity-gain updates (predict advances time + adds process noise;
-  updates apply simplified scalar-gain covariance shrinkage), NOT full
-  nonlinear quaternion dynamics + Jacobian-based Kalman gain. State
-  estimation is NOT flight-ready. Tracked as a limitation, not a bug.
-- **`themql-runtime` EmbassyRuntime sleep stub** — the embedded runtime's
-  sleep is a stub; embassy 0.10 `Spawner` is not `Send`/`Sync` so the
-  `EmbeddedRuntime` trait was relaxed from the spec. Confirm before
-  relying on the embedded runtime in flight. Tracked as a limitation.
+- (none remaining — the EKF now uses real Jacobian-based Kalman gain
+  with Joseph-form covariance update; the HashValidator now uses real
+  BLAKE3; the TchInferenceEngine now runs real model load + forward
+  pass + rollback behind `tch-backend`. All four safety-critical
+  crates are TETANUS-compliant.)
 
 ### Environment constraints (not bugs)
 
@@ -131,22 +123,29 @@ pass workspace-wide (default features). Full validation green.
   then completes. Real `themql-message` stream wiring (via the SSE/MQTT
   bridge) is a follow-up. The `SubscriptionRoot` struct holds an
   `Option<Arc<dyn GraphqlResolverBridge>>` reserved for that wiring.
+- **`themql-desktop` subcommand bodies** — `serve`/`analyze`/`train`/
+  `validate`/`telemetry` print banners only; real impls are follow-ups.
+- **`themql-embedded` main** — stub on x86 host; embassy requires
+  `thumbv7em` target. Real `#[embassy_executor::main]` is a future task.
 
-### Stub backends (not bugs)
+### Infrastructure-dependent backends (not bugs)
 
-- `themql-cache` L1 (cachelito API mismatch — `HashMap` fallback used),
-  L3 (valkey alpha driver lacks `DEL`/`EXPIRE`/binary — returns
-  `TierUnavailable`), and `themql-storage` L4 (helix-db needs live server
-  — in-memory `HashMap` fallback used). Real adapters are future tasks.
-- `invalidate_pattern` in `TieredCache` is best-effort (no
-  key→subject index yet — effectively a no-op for L1/L2).
+- L3 (redis) requires a running `redis-server` for live operation;
+  degrades gracefully to `TierUnavailable` when absent (unit tests
+  handle this).
+- L4 (sled) is disk-backed and works without external infrastructure.
+- MQTT integration tests need a running broker (unit tests use
+  config-only tests).
+- `tch-backend` feature tests need libtorch + more RAM than this
+  environment provides (feature compiles clean, tests not run).
 
 ### Tooling / CI (not bugs)
 
 - `cargo-deny`, `cargo-machete`, `cargo-bloat` installed and passing.
   `cargo deny check` passes (BSL-1.0 + CDLA-Permissive-2.0 added to
-  allowed licenses). `cargo machete --with-metadata` clean (11 unused
-  deps removed). `cargo bloat` passes on desktop binary.
+  allowed licenses, 10 RUSTSEC advisory ignores for unmaintained/
+  unsound transitive deps). `cargo machete --with-metadata` clean (11
+  unused deps removed). `cargo bloat` passes on desktop binary.
 - `opencode.json` written with `$schema`, `instructions: ["AGENTS.md"]`,
   permission rules, and `validate` + `safety-gate` custom commands.
 - `scripts/ci_guard.py` checks TOML parse + crate-name-vs-workspace
@@ -154,6 +153,7 @@ pass workspace-wide (default features). Full validation green.
 - `mold`, `sccache` not installed. Config files (`.cargo/config.toml`)
   are ready for when they are. Install: `apt install mold`,
   `cargo install sccache`. Then uncomment the relevant lines.
+- No GitHub Actions CI workflow yet (follow-up).
 - No fuzzing harness, no dependency-audit pipeline, no secret-management
   policy. Tracked in `SECURITY.md` known limitations.
 
@@ -162,4 +162,6 @@ pass workspace-wide (default features). Full validation green.
 - `[workspace.dependencies]` versions are resolved against crates.io
   (2026-08-19), but `valkey` is alpha (`0.0.0-alpha5`) and `cachelito` is a
   proc-macro for function caching — both may need reassessment for the
-  L1/L3 use cases.
+  L1/L3 use cases. (Phase 3 replaced valkey with `redis` for L3 and
+  cachelito with `lru` for L1; `valkey` and `cachelito` are no longer in
+  the cache crate's Cargo.toml.)

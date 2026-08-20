@@ -51,28 +51,26 @@ theMQL/
 | `themql-message` | core | Serializer trait + JsonSerializer + MessageError | 4 |
 | `themql-query` | core | CacheKey, CacheKeyer, QueryExecutor, Batcher, QueryError | 11 |
 | `themql-runtime` | runtime | DesktopRuntime (tokio) + EmbeddedRuntime (embassy), separate traits | 6 default + 8 desktop-feature |
-| `themql-cache` | cache | Cache trait, CacheEntry, CacheHit, CacheError (L1-L4 tiered) | 30 |
-| `themql-storage` | storage | Storage/Reader/Writer traits, StorageKey/Value/Query/ResultSet | 29 |
+| `themql-cache` | cache | Cache trait, CacheEntry, CacheHit, CacheError; L1 (lru), L2 (moka), L3 (redis), L4 (storage) + key→subject index | 32 |
+| `themql-storage` | storage | Storage/Reader/Writer traits, StorageKey/Value/Query/ResultSet; SledStorage (disk-backed), HelixStorage alias | 31 |
 | `themql-transport` | transport | Bridge trait, BridgeRoute, TransportKind (sub-specs: mqtt, graphql, sse) | 14 |
 | `themql-graphql` | transport | GraphqlSchema/GraphqlResolverBridge traits, Query/Mutation/Subscription #[Object]/#[Subscription] roots, GraphqlResolverBridgeImpl, DispatchBridgeImpl, GraphqlSchemaImpl, serve_graphql (axum) | 13 |
-| `themql-mqtt` | transport | MqttTransport/Publisher/Subscriber traits, subject↔topic mapping, codec | 14 |
-| `themql-sse` | transport | SseStream/SsePublisher traits, SseEvent wire format, broadcast-backed | 13 |
+| `themql-mqtt` | transport | MqttTransport/Publisher/Subscriber traits, subject↔topic mapping, codec, RumqttcTransport + RumqttcConfig | 25 |
+| `themql-sse` | transport | SseStream/SsePublisher traits, SseEvent wire format, TokioSsePublisher (broadcast), serve_sse (axum + Last-Event-ID) | 17 |
 | `themql-telemetry` | telemetry | TelemetryMessage, sensor structs, Covariance [f64;441] | 14 |
 | `themql-analysis` | desktop | AnalysisPipeline trait, PolarsDatasetBuilder, RayonAnalysisPipeline, StorageAnalysisPipeline | 12 |
-| `themql-training` | desktop | Trainer trait, TchTrainer (real training loop behind tch-backend), Dataset (polars-backed), TrainingConfig | 6 |
+| `themql-training` | desktop | Trainer trait, TchTrainer (real MLP training loop behind tch-backend), Dataset (polars-backed), TrainingConfig | 6 |
 | `themql-inference` | embedded | InferenceEngine trait, TchInferenceEngine (real model load + forward pass behind tch-backend), ResourceBudget (TETANUS) | 6 |
-| `themql-artifact` | cross-cutting | ArtifactValidator/Loader/Writer, ModelArtifact, HashValidator (BLAKE3), BincodeArtifactWriter (TETANUS) | 22 |
+| `themql-artifact` | cross-cutting | ArtifactValidator/Loader/Writer, ModelArtifact, HashValidator (real BLAKE3), FileArtifactLoader, BincodeArtifactWriter (TETANUS) | 22 |
 | `themql-gnc` | embedded | Controller trait, PID/LQRI/Hybrid, GncState 21-dim (TETANUS) | 7 |
-| `themql-estimation` | embedded | Estimator trait, Ekf, EstimatorState 21-dim (TETANUS) | 6 |
+| `themql-estimation` | embedded | Estimator trait, Ekf (Jacobian + Joseph-form Kalman gain), SensorModel, GpsModel, BaroModel, BayesianEstimator, EstimatorState 21-dim (TETANUS) | 24 |
 | `themql-embedded` | embedded binary | SensorDriver trait, GpsDriver/BaroDriver/ImuDriver, SensorError 5 variants (TETANUS) | 10 |
 | `themql-desktop` | desktop binary | Cli (clap), tokio main, ratatui/crossterm TUI dashboard, 3-pane layout | 13 |
 
-Total: 301 tests pass workspace-wide (default features) at Phase 3
-Stage 10 close; Phase 3 Stages 6 & 7 add real training/inference logic
-behind the `tch-backend` feature (6+6 default tests pass in
-themql-training/themql-inference). The `tch-backend` feature compiles
-clean in both crates but tests are not run (libtorch C++ build needs
-more RAM than this environment has — 7.8GB, no swap).
+Total: 304 unit tests + 1 doc test pass workspace-wide (default features)
+at the Phase 3 close. The `tch-backend` feature compiles clean in
+themql-training/themql-inference but tests are not run (libtorch C++ build
+needs more RAM than this environment has — 7.8GB, no swap).
 
 ## Authority hierarchy
 
@@ -103,22 +101,25 @@ historical artifacts. After every turn, the agent updates them (see
 ## Status
 
 v0.1 specification drop + Phase 1 complete + Phase 2 Stages 1-12
-complete + Phase 3 Stages 6, 7, 8, 9, 10 complete. Workspace skeleton,
-deep specs, toolchain config, real `src/` content for ALL 20 crates,
-cache/storage/transport backends, runtime impls, desktop/embedded
+complete + Phase 3 Stages 1-11 complete. Workspace skeleton, deep
+specs, toolchain config, real `src/` content for ALL 20 crates,
+cache/storage/transport backends (L1 lru, L2 moka, L3 redis, L4 sled;
+SledStorage + HelixStorage alias), runtime impls, desktop/embedded
 binary wiring, analysis/training/inference heavy-dep wiring,
 cross-crate type reconciliation, safety-critical tooling
 (cargo-deny/machete/bloat), opencode.json, CI guard script, a real
-GraphQL resolver bridge + axum HTTP/WS integration, a real SSE server,
-a real MQTT client, a real tch-backed training loop (themql-training),
-and a real tch-backed model load + forward pass (themql-inference) are
-all in place. Full workspace validation passes: `cargo fmt --check`,
-`cargo clippy` (clean for all touched crates), `cargo test --workspace`
-(301 tests, default features; one pre-existing flaky
-`themql-storage::helix_alias_works` sled failure in the uncommitted
-working tree). The `tch-backend` feature compiles clean in
+GraphQL resolver bridge + axum HTTP/WS integration, a real SSE server
+(axum + Last-Event-ID replay), a real MQTT client (rumqttc), a real
+tch-backed training loop (themql-training), a real tch-backed model
+load + forward pass (themql-inference), a real Jacobian-based EKF with
+Joseph-form covariance update (themql-estimation), and real BLAKE3
+artifact hashing (themql-artifact) are all in place. Full workspace
+validation passes: `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace` (305 tests,
+default features), `cargo deny check`, `cargo machete --with-metadata`,
+`scripts/ci_guard.py`. The `tch-backend` feature compiles clean in
 themql-training/themql-inference (tests not run: libtorch OOM). No
-`unsafe` code.
+`unsafe` code anywhere in the workspace.
 
 The four safety-critical crates (themql-gnc, themql-estimation,
 themql-inference, themql-artifact) comply with TETANUS.md (NASA JPL Power
@@ -128,25 +129,21 @@ feature gate in themql-training/themql-inference (libtorch download +
 RAM constraints prevent running `tch-backend` tests in this
 environment; the feature compiles clean).
 
-Known v0.1 placeholders (tracked, not blockers): the EKF uses simplified
-identity-gain updates (full quaternion dynamics is a follow-up); the
-desktop binary's serve/analyze/train/validate/telemetry commands print
-banners only (real impls are follow-ups); the embedded binary's main
-is a stub (`embassy runtime requires thumbv7em target`); `tch-backend`
-feature tests (TchTrainer real training loop, TchInferenceEngine real
-model load + forward pass) require libtorch and more RAM than this
-environment provides — the feature compiles clean in both crates;
-cachelito L1 / valkey L3 / helix-db L4 adapters are stubs (cachelito
-API mismatch, valkey alpha driver, helix-db needs live server); the
-GraphQL `SubscriptionRoot.subscribe` field emits a placeholder stream
-(real `themql-message` stream wiring is a follow-up); CacheKey is
-defined locally in themql-cache (reconcile with themql-query's
-CacheKeyer — Stage 10); a pre-existing flaky
-`themql-storage::helix_alias_works` sled temp connection failure exists
-in the uncommitted working tree (BUG-0008). The artifact HashValidator
-now uses real BLAKE3 (the placeholder fold hash was replaced); the
-TchTrainer training loop and TchInferenceEngine model loading/forward
-pass are now real (Phase 3 Stages 6/7).
+Known v0.1 placeholders (tracked, not blockers): the desktop binary's
+serve/analyze/train/validate/telemetry commands print banners only (real
+impls are follow-ups); the embedded binary's main is a stub (`embassy
+runtime requires thumbv7em target`); `tch-backend` feature tests
+(TchTrainer real training loop, TchInferenceEngine real model load +
+forward pass) require libtorch and more RAM than this environment
+provides — the feature compiles clean in both crates; the GraphQL
+`SubscriptionRoot.subscribe` field emits a placeholder stream (real
+`themql-message` stream wiring is a follow-up); L1/L3/L4 adapters that
+need live infrastructure (redis-server, helix-db HTTP server) degrade
+gracefully when the backing service is absent (L3 returns
+`TierUnavailable`, L4 falls back to sled disk storage). BUG-0008
+(pre-existing flaky `themql-storage::helix_alias_works` sled temp
+connection failure) is no longer reproducible after Phase 3 — all 31
+storage tests pass cleanly.
 
 The previous v0.0 inline spec that lived in this README has been superseded
 by the TOML spec set and is retained only in git history.

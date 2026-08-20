@@ -13,90 +13,74 @@ standing rules). When a session ends, fold the in-flight items into
 
 ## Just-completed turn
 
-Phase 3 Stages 6 and 7 complete: real training loop in
-`themql-training` and real model loading + forward pass in
-`themql-inference` (both behind the `tch-backend` feature).
+Phase 3 Stages 1-11 complete: all placeholder/stub implementations
+replaced with real backends across all 20 crates. Commit `828b373`
+pushed to `feat/phase-2-heavy-dep-wiring`, PR #4 open.
 
-1. **themql-training (Stage 6)**: Replaced the placeholder
-   `TchTrainer::train` with a real feed-forward training loop. Builds an
-   MLP (input → hidden×2 → output) sized to `config.feature_schema`,
-   trains with `tch::nn::Optimizer` (Adam + `config.weight_decay`) and
-   MSE loss for `config.epochs`, applies optional early stopping on
-   validation loss, then exports the trained network to `TorchScript`
-   bytes via `CModule::create_by_tracing` + `CModule::save` to a temp
-   file (read back as bytes). Returns a `TrainedModel` ready for
-   `BincodeArtifactWriter`.
-2. **Dataset re-export**: `themql-training::Dataset` now re-exports the
-   polars-backed `themql_analysis::Dataset` (was `Vec<Vec<f64>>`). Added
-   `polars` + `themql-analysis` deps to `themql-training`.
-3. **themql-inference (Stage 7)**: `TchInferenceEngine::load()` now runs
-   `themql_artifact::HashValidator::new().validate(&artifact)` and
-   rejects on any `report.errors`; rejects empty bytes on every load
-   (not just the first); deserialises `model_bytes` into a `tch::CModule`
-   via `CModule::load_data` and stores it pre-allocated at activation.
-   `infer()` runs the real forward pass (`module.forward_ts`), extracts
-   the output tensor to a 21-dim `state_correction` via `f_copy_data`,
-   checks `budget.inference_deadline_ms` against actual latency
-   (`DeadlineExceeded` on overrun), and populates `confidence` from the
-   output norm (`1/(1+||correction||)`). `rollback()` reloads the
-   previous bytes into a fresh `CModule`. Re-exported
-   `ArtifactValidator` from `themql-artifact` so the validator trait is
-   in scope.
-4. **Pre-existing cleanup**: Fixed pre-existing clippy lints in
-   `themql-analysis` (doc backticks, unused `StorageValue` import,
-   `cast_precision_loss`, `manual_async_fn`) and `themql-artifact`
-   (redundant closures, `similar_names` in tests) that were blocking the
-   `-p themql-training` / `-p themql-inference` clippy gates once the
-   new deps were wired in.
-
-Validation: `cargo test -p themql-training` (6 tests, 0 failures),
-`cargo test -p themql-inference` (6 tests, 0 failures),
-`cargo check -p themql-training --features tch-backend` clean,
-`cargo check -p themql-inference --features tch-backend` clean,
-`cargo clippy -p themql-training -p themql-inference -p themql-analysis
--p themql-artifact --all-targets -- -D warnings` clean, `cargo fmt
---check` clean, `cargo check --workspace` green, TOML parse sanity
-passes. `tch-backend` feature tests NOT run (libtorch C++ build needs
-more RAM than this environment has). All code `#![forbid(unsafe_code)]`.
+1. **themql-artifact (Stage 1)**: real BLAKE3 `HashValidator`,
+   `FileArtifactLoader`, `BincodeArtifactWriter` (bincode round-trip).
+   22 tests.
+2. **themql-storage (Stage 2)**: `SledStorage` (disk-backed sled),
+   `HelixStorage` alias, `ByPredicate` query support. 31 tests.
+3. **themql-cache (Stage 3)**: L1 (`lru::LruCache`), L2 (`moka::sync::Cache`),
+   L3 (`redis::Client`), key→subject index for pattern invalidation,
+   demotion on hit. 32 tests.
+4. **themql-estimation (Stage 4)**: real quaternion EKF with Jacobian +
+   Joseph-form Kalman gain (`K = PHᵀ(HPHᵀ+R)⁻¹`,
+   `P = (I-KH)P(I-KH)ᵀ + KRKᵀ`), `SensorModel<M>` trait, `GpsModel`,
+   `BaroModel`, `BayesianEstimator`. 24 tests.
+5. **themql-analysis (Stage 5)**: polars-backed types,
+   `StorageAnalysisPipeline`. 12 tests.
+6. **themql-training (Stage 6)**: real `TchTrainer` (MLP + Adam + MSE +
+   TorchScript export) behind `tch-backend`. 6 default tests.
+7. **themql-inference (Stage 7)**: real `TchInferenceEngine` (CModule
+   load + `forward_ts` + deadline check + rollback) behind `tch-backend`.
+   6 default tests.
+8. **themql-sse (Stage 8)**: real broadcast + `serve_sse` (axum +
+   Last-Event-ID replay). 17 tests.
+9. **themql-mqtt (Stage 9)**: `RumqttcTransport` + `RumqttcConfig`.
+   25 tests.
+10. **themql-graphql (Stage 10)**: `GraphqlResolverBridgeImpl`,
+    `GraphqlSchemaImpl`, `serve_graphql` (axum HTTP/WS). Core
+    `Resolver`/`MessageHandler` made dyn-compatible. 13 tests.
+11. **Stage 11 (validation)**: all 7 gates green. Commit `828b373`.
 
 ## State of the repository
 
-- Phase 1 complete (spec + 19 crates implemented).
-- Phase 2 Stages 1-12 complete: cache/storage backends, transport
-  adapters, runtime impls, desktop/embedded binary wiring,
-  analysis/training/inference heavy-dep wiring, cross-crate type
-  reconciliation, safety-critical tooling + opencode.json + CI guard.
-- Phase 3 Stages 6, 7, 8, 9, 10 complete: real SSE server, real MQTT
-  client, real GraphQL resolver bridge + axum HTTP/WS, real training
-  loop + real inference forward pass. 301+ tests pass workspace-wide
-  (default features; one pre-existing flaky
-  `themql-storage::helix_alias_works` sled connection failure in the
-  uncommitted working tree, unrelated to Stages 6/7). 20 crates, 20
-  specs.
-- `cargo fmt --check`, `cargo clippy` clean for all touched crates
-  (`themql-training`, `themql-inference`, `themql-analysis`,
-  `themql-artifact`). `cargo check --workspace` green.
+- Phase 1 complete (spec + 20 crates implemented).
+- Phase 2 Stages 1-12 complete.
+- Phase 3 Stages 1-11 complete: all placeholders replaced with real
+  backends. 305 tests pass workspace-wide (304 unit + 1 doc, default
+  features). 20 crates, 20 specs.
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace`, `cargo deny check`,
+  `cargo machete --with-metadata`, `scripts/ci_guard.py` — all green.
 - `tch-backend` feature compiles clean in both `themql-training` and
   `themql-inference` (tests not run: libtorch OOM).
-- BUG-0007 resolved (no open bugs).
+- No open bugs (BUG-0008 resolved — the flaky sled temp test is now
+  stable after Phase 3 Stage 2 replaced the in-memory HashMap with
+  real sled-backed SledStorage).
 
 ## In-flight work
 
-None. Phase 3 Stages 6 and 7 are complete. Changes are not committed
-(per AGENTS.md: commit only when explicitly asked).
+Phase 3 follow-ups (user-requested, starting now):
+
+- Workstream A: refresh living docs + merge PR #4 to main + create
+  `feat/phase-3-followups` branch. **In progress.**
+- Workstream B: wire real GraphQL subscriptions from themql-sse into
+  `SubscriptionRoot.subscribe`.
+- Workstream D: create GitHub Actions CI workflow.
+- Workstream C: implement all 5 themql-desktop subcommands
+  (serve/analyze/train/validate/telemetry).
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. Wire real `themql-message` streams into `SubscriptionRoot.subscribe`
-   (currently emits a placeholder value).
-2. Implement full nonlinear quaternion EKF dynamics + Jacobian-based
-   Kalman gain in themql-estimation.
-3. Run `tch-backend` feature tests once a beefier environment is
+1. (in progress) Workstream A → B → D → C.
+2. Run `tch-backend` feature tests once a beefier environment is
    available (>7.8GB RAM).
-4. Real cachelito L1, real valkey L3, real helix-db L4, key→subject
-   index for pattern invalidation.
-5. Investigate the pre-existing flaky `helix_alias_works` sled temp
-   connection failure in the uncommitted working tree.
+3. Real `themql-embedded` embassy main (requires thumbv7em target).
+4. Transport-layer authn/authz policy (MQTT broker credentials, GraphQL
+   access control).
 
 ## Open questions / blockers
 

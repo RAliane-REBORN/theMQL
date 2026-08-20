@@ -146,7 +146,7 @@ Before a change touches anything in `themql-transport`, `themql-graphql`,
 - Does it introduce unbounded channels or blocking work on the async
   executor? (must not)
 
-## Known limitations (as of v0.1, 2026-08-20, Phase 3 Stage 10 complete)
+## Known limitations (as of v0.1, 2026-08-20, Phase 3 Stages 1-11 complete)
 
 All 20 crates now have real `src/` content (traits + types + error types +
 unit tests). The four safety-critical crates (themql-gnc, themql-estimation,
@@ -156,17 +156,19 @@ no recursion, fixed loop bounds, no heap alloc after init where required,
 functions <= 60 lines, >= 2 assertions per public function as
 `if !invariant { return Err }`, no unwrap()/expect() in non-test code.
 
-- **BLAKE3 hash in themql-artifact (real, as of Phase 2)** —
-  `HashValidator` now uses `blake3::hash` for the 32-byte integrity
-  digest (the v0.1 placeholder fold hash was replaced in Phase 2).
-  Model artifacts are hash-verified before activation.
-  `TchInferenceEngine::load()` (Phase 3 Stage 7) runs the full
-  `HashValidator` validation pipeline and rejects on any errors.
-- **Simplified EKF in themql-estimation** — the v0.1 `Ekf` uses
-  identity-gain updates, NOT full nonlinear quaternion dynamics +
-  Jacobian-based Kalman gain. State estimation correctness is NOT
-  flight-ready. This is a tracked placeholder, not a security bug, but it
-  affects safety-of-flight if relied upon.
+- **BLAKE3 hash in themql-artifact (real, as of Phase 3 Stage 1)** —
+  `HashValidator` uses `blake3::hash` for the 32-byte integrity
+  digest (the v0.1 placeholder fold hash was replaced). Model artifacts
+  are hash-verified before activation. `TchInferenceEngine::load()`
+  (Phase 3 Stage 7) runs the full `HashValidator` validation pipeline
+  and rejects on any errors.
+- **Real EKF in themql-estimation (as of Phase 3 Stage 4)** — the `Ekf`
+  uses real Jacobian-based Kalman gain with Joseph-form covariance
+  update (`K = PHᵀ(HPHᵀ+R)⁻¹`, `P = (I-KH)P(I-KH)ᵀ + KRKᵀ`),
+  `SensorModel<M>` trait, `GpsModel`, `BaroModel`, and
+  `BayesianEstimator`. The v0.1 simplified identity-gain placeholder
+  is gone. State estimation correctness is now backed by real
+  quaternion dynamics + Jacobian linearisation.
 - **21-dim EKF state (fixed, no dynamic allocation)** — `EstimatorState`
   is a fixed 21-dimensional nalgebra `SVector<f64, 21>` with a fixed
   `SMatrix<f64, 21, 21>` covariance. No heap allocation after `new()`. This
@@ -175,10 +177,17 @@ functions <= 60 lines, >= 2 assertions per public function as
 - **TETANUS compliance of gnc/estimation/inference/artifact** — all four
   safety-critical crates carry `#![forbid(unsafe_code)]` and pass the Power
   of Ten rules. No `unsafe` exists anywhere in the workspace.
-- **No tch-backed InferenceEngine impl** — themql-inference defines the
-  `InferenceEngine` trait but has no concrete tch-backed implementation
-  (libtorch build dep deferred). The rollback/budget validation surface
-  exists; no live tensor execution surface yet.
+- **Real tch-backed InferenceEngine (as of Phase 3 Stage 7)** —
+  themql-inference has a concrete `TchInferenceEngine` behind the
+  `tch-backend` feature that loads a `tch::CModule` (after hash +
+  schema validation), runs `forward_ts`, checks the
+  `inference_deadline_ms` budget, and supports `rollback()`. ML
+  remains augmentative only (never the authoritative flight-control
+  path).
+- **Real tch-backed Trainer (as of Phase 3 Stage 6)** — themql-training
+  has a concrete `TchTrainer` behind `tch-backend` that builds an MLP,
+  trains with Adam + MSE, and exports to TorchScript bytes via
+  `CModule::create_by_tracing`.
 - **EmbassyRuntime sleep stub** — themql-runtime's `EmbassyRuntime` sleep
   is a stub; embassy 0.10 `Spawner` is not `Send`/`Sync` so the
   `EmbeddedRuntime` trait was relaxed from the spec. Confirm before
@@ -188,30 +197,26 @@ functions <= 60 lines, >= 2 assertions per public function as
   passing). `cargo machete` clean. `cargo bloat` passes.
 - No secret-management policy for HelixDB / Valkey credentials.
 - No transport-layer authn/authz policy (MQTT broker credentials, GraphQL
-  access control). These land in Phase 4 with the real transport
-  implementations. The SSE/MQTT/GraphQL adapters now prove the trait
-  surface compiles with heavy deps (tokio, async-graphql, serde_json)
-  but do not perform real network I/O — so no live attack surface yet.
-- `themql-cache`, `themql-storage` now have concrete backends wired
-  (L1 HashMap, L2 moka, L3 valkey stub, HelixStorage in-memory), but
-  the valkey/helix-db stubs return `TierUnavailable`/in-memory only —
-  no live networked cache/storage attack surface yet. When real valkey
-  L3 and helix-db L4 land, the trait boundary is where access control,
-  credential handling, and input validation must be enforced.
+  access control). These land in Phase 4. The SSE/MQTT/GraphQL adapters
+  now have real network I/O surfaces (axum HTTP, rumqttc MQTT client,
+  axum HTTP/WS) — transport-layer authn/authz is the next security
+  follow-up.
+- `themql-cache` has concrete backends wired (L1 lru, L2 moka, L3 redis,
+  L4 sled via themql-storage), with a key→subject index for pattern
+  invalidation. L3 requires a running `redis-server` (degrades to
+  `TierUnavailable` when absent). The trait boundary is where access
+  control, credential handling, and input validation must be enforced
+  when real valkey/redis L3 and helix-db L4 land.
 - `tch` is wired behind a `tch-backend` feature gate in
   themql-training/themql-inference. The feature compiles clean but tests
-  are not run in this environment (libtorch + RAM). As of Phase 3
-  Stages 6/7, `TchTrainer::train` runs a real feed-forward training
-  loop (Adam + MSE, exports to TorchScript bytes) and
-  `TchInferenceEngine::load/infer/rollback` run a real model load +
-  forward pass + rollback. The ML attack surface is now real: model
-  bytes are hash-validated + schema-validated before deserialisation
-  into a `tch::CModule`, and inference checks the
+  are not run in this environment (libtorch + RAM). The ML attack surface
+  is real: model bytes are hash-validated + schema-validated before
+  deserialisation into a `tch::CModule`, and inference checks the
   `inference_deadline_ms` budget. ML remains augmentative only (never
   the authoritative flight-control path).
 - `polars` + `rayon` are wired into themql-analysis. No live analysis
   attack surface yet (RayonAnalysisPipeline runs a trivial parallel
-  null-count).
+  null-count; StorageAnalysisPipeline queries themql-storage).
 - `themql-schema` is a pure type-definition crate with no I/O, no
   network, no unsafe code. No attack surface.
 

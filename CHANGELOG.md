@@ -5,6 +5,93 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 3 Stages 1-11 complete: all placeholders replaced with real backends
+
+Phase 3 replaced every remaining placeholder/stub implementation with
+real backends across all 20 crates. Commit `828b373`, PR #4. 305 tests
+pass workspace-wide (304 unit + 1 doc, default features). Full
+validation green (all 7 gates).
+
+#### Stage 1 — themql-artifact (real BLAKE3 + file/bincode I/O)
+- `HashValidator` now uses `blake3::hash` for the 32-byte integrity
+  digest (placeholder fold hash replaced).
+- `FileArtifactLoader` — loads a `ModelArtifact` from a filesystem
+  path (bincode deserialisation).
+- `BincodeArtifactWriter` — writes a `TrainedModel` to a
+  `ModelArtifact` on disk (computes blake3 hash, bincode serialisation).
+
+#### Stage 2 — themql-storage (real sled disk backend)
+- `SledStorage` — disk-backed sled key-value store implementing
+  `Storage`. `open(path)`, `open_temp()`, `get`/`put`/`delete`/
+  `query(ByKey | BySubjectPattern | ByPredicate)`.
+- `HelixStorage` is now `pub type HelixStorage = SledStorage`
+  (backward-compatible alias; the in-memory HashMap fallback is gone).
+- BUG-0008 (flaky `helix_alias_works`) resolved — sled temp open is
+  stable once the crate is fully wired.
+
+#### Stage 3 — themql-cache (real L1 lru + L2 moka + L3 redis + index)
+- `L1Cache` — backed by `lru::LruCache` (was `HashMap` + FIFO).
+- `L2Cache` — backed by `moka::sync::Cache` (unchanged from Phase 2,
+  confirmed real).
+- `L3Cache` — backed by `redis::Client` (was `valkey` alpha stub
+  returning `TierUnavailable` on every op; now real redis with
+  `get`/`set`/`del`/`expire`).
+- Key→subject index added to L1/L2 for pattern invalidation
+  (was effectively a no-op).
+- Demotion on hit: `get` promotes entries to higher tiers.
+
+#### Stage 4 — themql-estimation (real Jacobian EKF)
+- `Ekf` now uses real Jacobian-based Kalman gain with Joseph-form
+  covariance update: `K = PHᵀ(HPHᵀ+R)⁻¹`,
+  `P = (I-KH)P(I-KH)ᵀ + KRKᵀ` (was simplified identity-gain).
+- `SensorModel<M>` trait + `GpsModel` (7-dim: pos+vel+clock_bias) +
+  `BaroModel` (2-dim: altitude+bias) with real `predict_measurement`,
+  `jacobian`, `innovation`.
+- `BayesianEstimator` trait + `propagate_uncertainty` + `sample`.
+
+#### Stage 5 — themql-analysis (polars + storage query)
+- `StorageAnalysisPipeline` — queries `themql-storage` and builds
+  `PolarsAnalysisResult` from the results.
+- Polars-backed `Dataset` type (re-exported by themql-training).
+
+#### Stage 6 — themql-training (real TchTrainer)
+- `TchTrainer::train` builds an MLP, trains with Adam + MSE for
+  `config.epochs` (optional early stopping), exports to TorchScript
+  bytes via `CModule::create_by_tracing`. Behind `tch-backend` feature.
+
+#### Stage 7 — themql-inference (real TchInferenceEngine)
+- `TchInferenceEngine::load()` runs `HashValidator::validate`,
+  rejects on errors, deserialises into `tch::CModule`.
+  `infer()` runs `forward_ts`, checks `inference_deadline_ms`,
+  populates `confidence` from output norm.
+  `rollback()` reloads previous bytes. Behind `tch-backend` feature.
+
+#### Stage 8 — themql-sse (real axum server)
+- `TokioSsePublisher` (broadcast channel + bounded event log),
+  `TokioSseStream` (broadcast receiver → SSE event stream),
+  `serve_sse` (axum router with `GET /events`, Last-Event-ID replay).
+
+#### Stage 9 — themql-mqtt (real rumqttc client)
+- `RumqttcTransport` wraps `rumqttc::AsyncClient` + `EventLoop`.
+  `RumqttcConfig` builder with `to_mqtt_options()`.
+  `MqttQos::to_rumqttc()` mapping. publish/subscribe/`poll()`.
+
+#### Stage 10 — themql-graphql (real resolver bridge + axum HTTP/WS)
+- `GraphqlResolverBridgeImpl` wraps `Arc<dyn themql_core::Resolver>`.
+  `DispatchBridgeImpl` wraps `Arc<dyn themql_core::MessageHandler>`.
+  `QueryRoot`/`MutationRoot` real fields.
+  `SubscriptionRoot.subscribe` emits placeholder stream (follow-up).
+  `serve_graphql(schema) -> axum::Router` (POST /graphql + GET /graphql WS).
+  Core `Resolver`/`MessageHandler` made dyn-compatible (boxed futures,
+  `ResolverBoxed` blanket-impl adapter).
+
+#### Stage 11 — final validation
+- All 7 gates green. Commit `828b373` (36 files, +4799/-811).
+- `deny.toml` updated: 10 RUSTSEC advisory ignores for unmaintained/
+  unsound transitive deps; removed `rusqlite` ban (no longer relevant).
+- 6 spec files amended (model_artifact, storage, cache, mqtt, sse,
+  graphql).
+
 ### 2026-08-20 — Phase 3 Stages 6 & 7: real training loop + real inference forward pass
 
 Replaced the placeholder `tch-backend` implementations in

@@ -959,9 +959,6 @@ mod tests {
             (q_norm - 1.0).abs() < 1.0e-6,
             "quaternion unit norm after cycle"
         );
-        assert!(
-            ekf.covariance().trace() < 21.0_f64,
-            "covariance reduced"
-        );
+        assert!(ekf.covariance().trace() < 21.0_f64, "covariance reduced");
     }
 }

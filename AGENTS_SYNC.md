@@ -19,6 +19,18 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 3 follow-ups)
+
+Phase 3 follow-ups (Workstreams A/B/C/D) executed by the lead opencode
+agent directly; no subagents were spawned. Workstream A (living-docs
+refresh + PR #4 merge + new branch) in progress.
+
+### 2026-08-20 — no subagents this turn (earlier)
+
+Phase 3 Stages 1-11 (all placeholder/stub implementations replaced with
+real backends across all 20 crates) were executed by the lead opencode
+agent directly; no subagents were spawned.
+
 ### 2026-08-20 — no subagents this turn
 
 Phase 3 Stages 6 & 7 (real training loop in themql-training + real

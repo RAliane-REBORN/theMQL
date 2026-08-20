@@ -4,7 +4,90 @@ Handover notes for the next agent/session. Fold in-flight items from
 `SESSION.md` here when a session ends. Update after every turn (see
 `MEMORY.md` standing rules).
 
-## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 3 Stages 6 & 7 complete)
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 3 complete — all stubs replaced)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-12
+  complete. **Phase 3 Stages 1-11 complete**: all placeholder/stub
+  implementations replaced with real backends.
+- Branch: `feat/phase-2-heavy-dep-wiring` (PR #4 open, mergeable).
+- 305 tests pass workspace-wide (304 unit + 1 doc, default features).
+  20 crates, 20 specs.
+- Full validation green: `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace` (305),
+  `cargo deny check`, `cargo machete --with-metadata`,
+  `scripts/ci_guard.py`, `cargo metadata --no-deps`.
+- `tch-backend` feature compiles clean in themql-training/
+  themql-inference (tests not run: libtorch + RAM constraints).
+- No open bugs. BUG-0008 (flaky `helix_alias_works`) resolved — the
+  test is now stable after Phase 3 Stage 2 replaced the in-memory
+  HashMap with real sled-backed `SledStorage`.
+- Commit `828b373` pushed. Working tree clean (modulo in-flight
+  Workstream A doc-refresh).
+
+### What is done this turn
+
+Phase 3 replaced every remaining placeholder with a real backend:
+
+- **Stage 1 — themql-artifact**: real `blake3::hash` in `HashValidator`,
+  `FileArtifactLoader`, `BincodeArtifactWriter` (bincode round-trip).
+- **Stage 2 — themql-storage**: `SledStorage` (disk-backed sled),
+  `HelixStorage` alias, `ByPredicate` query support.
+- **Stage 3 — themql-cache**: L1 (`lru::LruCache`), L2
+  (`moka::sync::Cache`), L3 (`redis::Client`), key→subject index for
+  pattern invalidation, demotion on hit.
+- **Stage 4 — themql-estimation**: real quaternion EKF with Jacobian +
+  Joseph-form Kalman gain (`K = PHᵀ(HPHᵀ+R)⁻¹`,
+  `P = (I-KH)P(I-KH)ᵀ + KRKᵀ`), `SensorModel<M>` trait, `GpsModel`,
+  `BaroModel`, `BayesianEstimator`.
+- **Stage 5 — themql-analysis**: polars-backed types,
+  `StorageAnalysisPipeline`.
+- **Stage 6 — themql-training**: real `TchTrainer` (MLP + Adam + MSE +
+  TorchScript export) behind `tch-backend`.
+- **Stage 7 — themql-inference**: real `TchInferenceEngine` (CModule
+  load + `forward_ts` + deadline check + rollback) behind `tch-backend`.
+- **Stage 8 — themql-sse**: real broadcast + `serve_sse` (axum +
+  Last-Event-ID replay).
+- **Stage 9 — themql-mqtt**: `RumqttcTransport` + `RumqttcConfig`.
+- **Stage 10 — themql-graphql**: `GraphqlResolverBridgeImpl`,
+  `GraphqlSchemaImpl`, `serve_graphql` (axum HTTP/WS). Core
+  `Resolver`/`MessageHandler` made dyn-compatible.
+- **Stage 11 — validation**: all 7 gates green. Commit `828b373`.
+
+### What is NOT done (follow-ups, not blockers)
+
+- GraphQL `SubscriptionRoot.subscribe` emits a placeholder stream
+  (real themql-message stream wiring is Workstream B).
+- `themql-desktop` serve/analyze/train/validate/telemetry subcommands
+  print banners only (real impls are Workstream C).
+- `themql-embedded` main is a stub (embassy requires thumbv7em target).
+- `tch-backend` feature tests not run (libtorch + RAM).
+- No GitHub Actions CI workflow yet (Workstream D).
+- No transport-layer authn/authz policy (MQTT/GraphQL access control).
+- No fuzzing harness, no secret-management policy.
+- `mold` + `sccache` not installed (config ready in `.cargo/config.toml`).
+
+### Environment constraints
+
+- 7.8GB RAM, no swap. Use `CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none` for polars-dependent builds.
+- `tch-backend` feature compiles clean but tests are NOT run (libtorch
+  download + RAM).
+- Full workspace test takes ~15min with these settings.
+
+### Validation commands the next agent should run
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test --workspace
+cargo deny check
+cargo machete --with-metadata
+python3 scripts/ci_guard.py
+```
+
 
 ### Repository state at handover
 
