@@ -649,6 +649,7 @@ impl<S: Storage> TieredCache<S> {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl<S: Storage> Cache for TieredCache<S> {
     async fn get(&self, key: &CacheKey, policy: &CachePolicy) -> Result<CacheHit, CacheError> {
         if !policy.enabled {
@@ -1118,6 +1119,7 @@ mod tests {
         map: std::sync::Mutex<std::collections::HashMap<StorageKey, StorageValue>>,
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl Storage for InMemoryStorage {
         async fn get(&self, key: &StorageKey) -> Result<Option<StorageValue>, StorageError> {
             Ok(self.map.lock().unwrap().get(key).cloned())

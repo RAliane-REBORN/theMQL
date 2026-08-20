@@ -4,7 +4,7 @@ Handover notes for the next agent/session. Fold in-flight items from
 `SESSION.md` here when a session ends. Update after every turn (see
 `MEMORY.md` standing rules).
 
-## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 5 complete — no_std GNC/estimation + embedded EKF/controller + authz)
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Rust 1.98.0 toolchain drift fix — unblocks PR #7)
 
 ### Repository state at handover
 
@@ -13,12 +13,14 @@ Handover notes for the next agent/session. Fold in-flight items from
   (PR #5 merged). Phase 4 complete (PR #6 merged). **Phase 5 complete**:
   no_std gnc/estimation, real EKF+HybridController in embedded binary,
   GraphQL authz guards + MQTT topic ACLs.
-- Branch: `feat/phase-5-no_std-authz` (PR pending).
+- Rust 1.98.0 toolchain drift fixed this turn (clippy
+  `unused_async_trait_impl` + rustfmt formatting drift).
+- Branch: `feat/phase-5-no_std-authz` (PR #7 open, CI retriggered).
 - 341 tests pass workspace-wide (default features). 20 crates, 21 specs.
 - Full validation green: `cargo fmt --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo test --workspace` (341),
-  `cargo deny check`, `cargo machete --with-metadata`,
-  `scripts/ci_guard.py`, TOML sanity, `cargo metadata`.
+  `cargo deny check`, `cargo machete --with-metadata`, TOML sanity,
+  `cargo metadata`.
 - `cargo build -p themql-embedded --target thumbv7em-none-eabihf` green
   (embedded binary with real EKF + HybridController).
 - CI: 9 jobs (fmt, check, clippy, test, toml-sanity, ci-guard, deny,
@@ -27,6 +29,18 @@ Handover notes for the next agent/session. Fold in-flight items from
 - No open bugs.
 
 ### What is done this turn
+
+Rust 1.98.0 toolchain drift fix (5 files touched, 9 insertions, 3
+deletions):
+- `cargo fmt` applied to fix 2-file formatting drift.
+- `#[allow(clippy::unused_async_trait_impl)]` added to 6 trait impl
+  blocks across 4 crates (`themql-storage`, `themql-graphql`,
+  `themql-cache`, `themql-desktop`) where `async fn` trait impls have
+  no `.await` (synchronous bodies). The opposite `manual_async_fn` lint
+  prevents the `fn -> impl Future + async move` refactor — clippy 1.98.0
+  has conflicting lints here.
+- Living docs updated (SESSION, CHANGELOG, MEMORY, HANDOVER,
+  AGENTS_SYNC).
 
 Phase 5 — 3 steps:
 

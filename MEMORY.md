@@ -72,9 +72,20 @@ deliberate, not an oversight.
 - Language: Rust
 - License: MIT
 - Repository: https://github.com/RAliane-REBORN/theMQL
-- Toolchain: stable channel, no version pin
+- Toolchain: stable channel, no version pin (currently 1.98.0, 88d9e12ae 2026-08-18)
 - Workspace resolver: 2
 - Branch: `feat/phase-5-no_std-authz` (off main, post PR #6 merge)
+
+### Toolchain notes
+
+- **Rust 1.98.0** introduced clippy lint `unused_async_trait_impl`
+  (fires on `async fn` in trait impls with no `.await`) AND
+  `manual_async_fn` (fires on `fn -> impl Future` with `async move`
+  body). These conflict: cannot satisfy both for synchronous trait
+  impls. Resolution: keep `async fn` and add
+  `#[allow(clippy::unused_async_trait_impl)]` on the impl block. This
+  affects 6 impl blocks across 4 crates (themql-storage, themql-graphql,
+  themql-cache, themql-desktop) as of 2026-08-20.
 
 ### Crates (20)
 

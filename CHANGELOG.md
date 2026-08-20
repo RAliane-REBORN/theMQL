@@ -5,6 +5,27 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Rust 1.98.0 toolchain drift fix
+
+Rust 1.98.0 stable (88d9e12ae 2026-08-18) released during PR #7 review.
+New clippy lint `unused_async_trait_impl` and rustfmt formatting drift
+caused PR #7 CI to fail on `cargo fmt` and `cargo clippy` (all other 13
+checks passed).
+
+- **rustfmt**: 2 files auto-fixed via `cargo fmt` (`themql-embedded`
+  import reorder, `themql-mqtt` `matches!` arm line break).
+- **clippy `unused_async_trait_impl`**: 6 trait impl blocks across 4
+  crates use `async fn` without `.await` (synchronous bodies satisfying
+  `fn -> impl Future<...>` trait signatures). Tried `fn -> impl Future
+  + async move` refactor first but it triggers the opposite
+  `manual_async_fn` lint — clippy 1.98.0 has conflicting lints here.
+  Fixed by keeping `async fn` and adding
+  `#[allow(clippy::unused_async_trait_impl)]` on each affected impl
+  block: `SledStorage`, `RoleGuard`, `TieredCache<S>`,
+  `StubResolver`/`DesktopResolver` (test + bin), `InMemoryStorage`
+  (test).
+- 341 tests pass workspace-wide (unchanged). Full validation green.
+
 ### 2026-08-20 — Phase 5: no_std GNC/estimation + embedded EKF/controller + authz
 
 Three steps completing Phase 5:

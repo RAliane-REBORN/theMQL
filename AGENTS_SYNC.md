@@ -19,6 +19,15 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Rust 1.98.0 toolchain drift fix)
+
+Toolchain-compatibility fix executed by the lead opencode agent
+directly; no subagents were spawned. Rust 1.98.0 stable released during
+PR #7 review, introducing `unused_async_trait_impl` clippy lint and
+rustfmt drift. Fixed 6 trait impl blocks across 4 crates with
+`#[allow(clippy::unused_async_trait_impl)]` + `cargo fmt`. 341 tests
+pass workspace-wide.
+
 ### 2026-08-20 — no subagents this turn (Phase 5 complete)
 
 Phase 5 (no_std GNC/estimation + embedded EKF/controller + authz, 3

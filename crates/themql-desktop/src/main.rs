@@ -161,6 +161,7 @@ async fn dispatch(command: &Command) -> Result<(), themql_core::Error> {
 /// Stub resolver for the serve subcommand — returns the subject as JSON.
 struct DesktopResolver;
 
+#[allow(clippy::unused_async_trait_impl)]
 impl themql_core::ResolverBoxed for DesktopResolver {
     async fn resolve(
         &self,

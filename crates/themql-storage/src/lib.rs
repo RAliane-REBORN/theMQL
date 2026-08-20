@@ -316,7 +316,7 @@ impl SledStorage {
     }
 }
 
-#[allow(async_fn_in_trait)]
+#[allow(clippy::unused_async_trait_impl)]
 impl Storage for SledStorage {
     async fn get(&self, key: &StorageKey) -> Result<Option<StorageValue>, StorageError> {
         let kb = Self::serialize_key(key)?;

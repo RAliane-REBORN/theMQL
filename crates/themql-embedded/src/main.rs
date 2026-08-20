@@ -349,11 +349,11 @@ fn estimator_to_gnc_state(est: &themql_estimation::EstimatorState) -> themql_gnc
 
 #[cfg(target_os = "none")]
 mod embedded {
-    use embedded_alloc::TlsfHeap as Heap;
     use embassy_executor::Spawner;
     use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
     use embassy_sync::channel::Channel;
     use embassy_time::{Duration, Timer};
+    use embedded_alloc::TlsfHeap as Heap;
     use static_cell::StaticCell;
 
     use themql_estimation::{

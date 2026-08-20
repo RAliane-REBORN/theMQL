@@ -308,6 +308,7 @@ impl RoleGuard {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl Guard for RoleGuard {
     async fn check(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<()> {
         match ctx.data::<AuthRole>() {
@@ -601,6 +602,7 @@ mod tests {
 
     struct StubResolver;
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl themql_core::ResolverBoxed for StubResolver {
         async fn resolve(&self, query: &Query, _ctx: &Context) -> Result<Response, Error> {
             let subject = query.resource.subject.as_str();

@@ -242,7 +242,8 @@ impl AclRule {
     pub fn permits(&self, action: AclAction, topic: &str) -> bool {
         let action_ok = matches!(
             (self.action, action),
-            (AclAction::PubSub, _) | (AclAction::Publish, AclAction::Publish)
+            (AclAction::PubSub, _)
+                | (AclAction::Publish, AclAction::Publish)
                 | (AclAction::Subscribe, AclAction::Subscribe)
         );
         action_ok && self.topic_matches(topic)

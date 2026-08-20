@@ -13,44 +13,38 @@ standing rules). When a session ends, fold the in-flight items into
 
 ## Just-completed turn
 
-Phase 5 — no_std GNC/estimation, embedded EKF+controller wiring, authz (3 steps):
+Rust 1.98.0 toolchain drift fix (unblocked PR #7 CI):
 
-1. **Step 1 — no_std migration of themql-gnc + themql-estimation**: Both
-   crates now compile with `--no-default-features` (no_std + alloc).
-   `default = ["std"]` feature gates `themql-core` + `thiserror/std`.
-   `nalgebra` with `default-features = false` + `libm` for float
-   transcendentals. `num-traits` with `libm` for `Real` trait
-   (estimation, no_std mode only). `extern crate alloc;` +
-   `use alloc::string::String / vec::Vec`. `core::fmt` / `core::ptr`
-   instead of `std::fmt` / `std::ptr`. `#[cfg(feature = "std")]` gate on
-   `From<Error> for themql_core::Error`. Tests pass in both modes.
+Rust 1.98.0 stable (88d9e12ae 2026-08-18) dropped today during PR #7
+review and introduced two new clippy lints and rustfmt formatting drift.
+CI on PR #7 went UNSTABLE: `cargo fmt` and `cargo clippy` failed (both
+ran twice due to duplicate-workflow push). All other 13 check runs pass.
 
-2. **Step 2 — Wire real EKF + HybridController into embedded binary**:
-   The embedded binary now runs the full GNC pipeline on thumbv7em.
-   Global allocator (`embedded-alloc::TlsfHeap`, 16KB heap) for alloc
-   usage. `estimator_task`: real EKF predict (IMU) + update (GPS/baro).
-   `controller_task`: real `HybridController` consuming
-   `EstimatorState`. `estimator_to_gnc_state` free function maps 21-dim
-   state to `GncState`. `EST_CHAN`: estimator→controller channel.
-   Sensor decode functions (stub drivers → zero readings). Single
-   `unsafe` block in `main()` for allocator init (justified in TETANUS
-   docs). `forbid(unsafe_code)` → `deny(unsafe_code)` with local allow.
-   +3 host tests (19 total).
+### Fixes applied
 
-3. **Step 3 — GraphQL authz + MQTT ACLs**: `AuthRole` enum (Admin,
-   Operator, Observer) with hierarchy. `RoleGuard` implementing
-   `async_graphql::Guard`. QueryRoot fields guarded with Observer,
-   MutationRoot with Operator, SubscriptionRoot with Observer.
-   `GraphqlSchemaImpl::with_role()` injects role as global data. MQTT
-   `AclAction` / `AclRule` / `MqttAcl` with topic pattern matching
-   (`*` wildcard). `admin_acl`/`operator_acl`/`observer_acl` presets.
-   `RumqttcConfig.with_acl()` + `RumqttcTransport` checks ACL before
-   publish/subscribe. Desktop: `serve()` uses `with_role(Admin)`, MQTT
-   username → ACL mapping. +17 authz tests across crates.
+1. **rustfmt drift** (2 files, auto-fixed via `cargo fmt`):
+   - `crates/themql-embedded/src/main.rs` — `use embedded_alloc::TlsfHeap`
+     import reorder in `mod embedded`.
+   - `crates/themql-mqtt/src/lib.rs:242` — `matches!` arm line break.
 
-**Totals**: 341 tests pass workspace-wide (was 325). Full validation
-green: fmt, check, clippy, test, deny, machete, embedded-check,
-toml-sanity, ci-guard.
+2. **clippy `unused_async_trait_impl`** (5 impl blocks across 4 crates):
+   Rust 1.98.0 flags `async fn` in trait impls with no `.await`. The
+   traits all use `fn -> impl Future<...>` signatures, so `async fn`
+   impls are sugar. Tried the `fn -> impl Future + async move` refactor
+   first but it triggers the opposite lint `manual_async_fn` — clippy
+   1.98.0 has conflicting lints here. Cleanest fix: keep `async fn` and
+   add `#[allow(clippy::unused_async_trait_impl)]` on each impl block.
+   Affected blocks:
+   - `themql-storage`: `impl Storage for SledStorage` (4 methods).
+   - `themql-graphql`: `impl Guard for RoleGuard` (1 method).
+   - `themql-graphql` tests: `impl ResolverBoxed for StubResolver`.
+   - `themql-cache`: `impl Cache for TieredCache<S>` (invalidate_pattern).
+   - `themql-cache` tests: `impl Storage for InMemoryStorage` (4 methods).
+   - `themql-desktop`: `impl ResolverBoxed for DesktopResolver`.
+
+**Totals**: 341 tests pass workspace-wide (unchanged). Full validation
+green: fmt, check, test (341), clippy, deny, machete, toml-sanity,
+metadata.
 
 ## State of the repository
 
@@ -62,6 +56,7 @@ toml-sanity, ci-guard.
   embassy embedded main.
 - Phase 5 complete: no_std gnc/estimation, real EKF+controller in
   embedded binary, GraphQL authz guards + MQTT topic ACLs.
+- Rust 1.98.0 toolchain drift fixed (this turn).
 - 341 tests pass workspace-wide (default features). 20 crates, 21 specs.
 - Full validation green.
 - `tch-backend` feature compiles clean (tests not run: libtorch OOM).
@@ -71,12 +66,12 @@ toml-sanity, ci-guard.
 
 ## In-flight work
 
-None. Phase 5 is complete. Changes are committed on
-`feat/phase-5-no_std-authz` branch, ready to push and open PR.
+PR #7 (`feat/phase-5-no_std-authz`) CI was UNSTABLE due to Rust 1.98.0
+drift. Fixup commit ready to push to retrigger CI.
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. Merge Phase 5 PR to main after CI green.
+1. Push fixup, wait for PR #7 CI green, then merge with `--squash --delete-branch`.
 2. Run `tch-backend` feature tests once a beefier environment is
    available (>7.8GB RAM).
 3. Per-request role extraction from better-auth sessions (currently
