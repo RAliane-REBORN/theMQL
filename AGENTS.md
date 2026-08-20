@@ -144,7 +144,8 @@ See `TETANUS.md` for the full rationale and enforcement mechanisms.
 async-graphql · embassy · apalis · rayon · cachelito (L1) · moka (L2) ·
 valkey (L3) · helix-db (L4 + storage) · dioxus · polars · tch · ndarray
 (raw ML-side buffers only) · nalgebra (conventional numerics, incl.
-quaternion) · clap · ratatui
+quaternion) · clap · ratatui · better-auth (GraphQL session auth) ·
+heapless (embedded fixed-capacity containers)
 
 Workspace dep versions in `Cargo.toml [workspace.dependencies]` are
 **resolved against crates.io** (2026-08-19). Prefer
@@ -180,13 +181,17 @@ quaternion); `ndarray` is retained only for raw ML-side array buffers.
 Cross-crate deps use `workspace = true` path deps declared in the root
 `Cargo.toml [workspace.dependencies]` (e.g. `themql-message.workspace = true`).
 
-## Repo state (v0.1, 2026-08-20, Phase 2 Stages 1-11 complete)
+## Repo state (v0.1, 2026-08-20, Phase 4 complete)
 
 - 20 crates (18 libs + 2 binaries), all with real `src/` content.
-- 240 tests pass workspace-wide (default features).
+- 21 specs (20 original + `specs/auth.toml`).
+- 325 tests pass workspace-wide (default features).
 - Full validation green: `cargo fmt --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny
   check`, `cargo machete --with-metadata`, `scripts/ci_guard.py`.
+- Embedded binary cross-compiles for `thumbv7em-none-eabihf`.
+- CI: 9 jobs (fmt, check, clippy, test, toml-sanity, ci-guard, deny,
+  machete, embedded-check).
 - `opencode.json` present with permissions + validate/safety-gate commands.
 - `tch-backend` feature in themql-training/themql-inference compiles
   clean (`cargo check`); tests not run (libtorch C++ build needs more

@@ -4,6 +4,81 @@ Handover notes for the next agent/session. Fold in-flight items from
 `SESSION.md` here when a session ends. Update after every turn (see
 `MEMORY.md` standing rules).
 
+## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 4 complete — MQTT bridge + auth + embedded embassy)
+
+### Repository state at handover
+
+- Phase 1 complete (spec + 20 crates implemented). Phase 2 Stages 1-12
+  complete. Phase 3 Stages 1-11 complete. Phase 3 followups complete
+  (PR #5 merged to main). **Phase 4 complete**: MQTT-to-SSE bridge,
+  better-auth GraphQL auth, MQTT broker credentials, real embassy
+  embedded main.
+- Branch: `feat/phase-4-mqtt-auth-embedded` (PR #6 pending).
+- 325 tests pass workspace-wide (default features). 20 crates, 21 specs.
+- Full validation green: `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace` (325),
+  `cargo machete --with-metadata`, `scripts/ci_guard.py`, TOML sanity.
+- `cargo check --target thumbv7em-none-eabihf` green (embedded binary).
+- CI: 9 jobs (fmt, check, clippy, test, toml-sanity, ci-guard, deny,
+  machete, embedded-check).
+- `tch-backend` feature compiles clean (tests not run: libtorch + RAM).
+- No open bugs.
+
+### What is done this turn
+
+Phase 4 — 4 steps:
+
+1. **Step 1**: Removed unused `serde_json` dev-dep from themql-analysis
+   (machete fix). PR #5 merged to main.
+2. **Step 2**: MQTT-to-SSE bridge in `serve`. `MqttToSseBridge`
+   (MessageHandler) re-publishes MQTT messages to SSE publisher.
+   `serve_sse_with_publisher` added to themql-sse. +3 tests.
+3. **Step 3**: `specs/auth.toml` created. `better-auth` 0.10 added.
+   `RumqttcConfig` gains `with_credentials()`. `--enable-auth` +
+   `--auth-secret`/`THEMQL_AUTH_SECRET` wires BetterAuth +
+   EmailPasswordPlugin into serve router. `--mqtt-username`/
+   `--mqtt-password` for broker authn. +5 tests.
+4. **Step 4**: Real embassy `#![no_std]` + `#![no_main]` embedded main
+   with 7 tasks (gps/baro/imu/estimator/telemetry/inference/command),
+   `embassy_sync::channel::Channel` for inter-task comms, `HeapString`
+   for no_std errors, panic handler, host stub for x86 tests.
+   Cross-compiles for thumbv7em-none-eabihf. New CI embedded-check job.
+   +7 tests.
+
+### What is NOT done (follow-ups, not blockers)
+
+- GNC/estimation crates are not `no_std` — embassy tasks stub the
+  EKF/controller logic. Making themql-gnc/themql-estimation `no_std`
+  is a future phase.
+- GraphQL field-level authz (subject-pattern ACLs per role) not
+  implemented — only authn (session creation) is wired.
+- MQTT topic filter ACLs per client id not implemented.
+- `tch-backend` feature tests not run (libtorch + RAM).
+- No fuzzing harness, no secret-management policy.
+- `mold` + `sccache` not installed (config ready in `.cargo/config.toml`).
+
+### Environment constraints
+
+- 7.8GB RAM, no swap. Use `CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none` for polars-dependent builds.
+- `tch-backend` feature compiles clean but tests are NOT run.
+- Full workspace test takes ~15min with these settings.
+- Cross-compile: `cargo check -p themql-embedded --target
+  thumbv7em-none-eabihf` (target already installed).
+
+### Validation commands the next agent should run
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=none cargo test --workspace
+cargo deny check
+cargo machete --with-metadata
+python3 scripts/ci_guard.py
+cargo check -p themql-embedded --target thumbv7em-none-eabihf
+```
+
 ## Handover from: opencode (glm-5.2:cloud), 2026-08-20 (Phase 3 complete — all stubs replaced)
 
 ### Repository state at handover

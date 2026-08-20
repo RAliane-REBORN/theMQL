@@ -5,7 +5,59 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
-### 2026-08-20 — Phase 3 followups: real GraphQL subscriptions + CI + desktop subcommands
+### 2026-08-20 — Phase 4: MQTT bridge + auth + embedded embassy main
+
+Four steps completing the Phase 4 follow-ups:
+
+#### Step 1 — Fix machete + merge PR #5
+- Removed unused `serde_json` dev-dep from `themql-analysis` (flagged
+  by CI `cargo machete` job on PR #5).
+- All 8 CI jobs green. PR #5 merged to main (`983e529`).
+
+#### Step 2 — Wire MQTT-to-SSE bridge into serve subcommand
+- Added `themql-mqtt` dependency to `themql-desktop`.
+- `MqttToSseBridge` implements `MessageHandler`: incoming MQTT
+  messages are decoded and re-published to the SSE publisher via
+  `SsePublisher::broadcast()`. Routes via `themql-core Message`,
+  never adapter-to-adapter (per `specs/transport.toml [bridges]`).
+- New CLI args: `--enable-mqtt`, `--mqtt-host`, `--mqtt-port`,
+  `--mqtt-client-id`. Background tokio task drives rumqttc event loop.
+- Added `serve_sse_with_publisher` to `themql-sse`: accepts
+  `Arc<TokioSsePublisher>` so the bridge and HTTP handler share the
+  same publisher instance.
+- +3 tests (15 total in themql-desktop).
+
+#### Step 3 — Auth via better-auth + MQTT credentials
+- Created `specs/auth.toml`: authn (GraphQL sessions via better-auth,
+  MQTT username/password), authz (role-based ACLs: admin/operator/
+  observer), constraints (no custom auth engine, no secrets in source).
+- Added `better-auth` 0.10 (features: axum, rustls) to workspace deps.
+- `RumqttcConfig` gains `username`/`password` fields +
+  `with_credentials()` builder → `MqttOptions::set_credentials()`.
+- `--enable-auth` + `--auth-secret` (or `THEMQL_AUTH_SECRET` env var)
+  builds `BetterAuth` with `MemoryDatabaseAdapter` +
+  `EmailPasswordPlugin`, mounts auth routes on the axum router.
+- `--mqtt-username` / `--mqtt-password` for broker authn.
+- +5 tests (3 MQTT credentials, 2 desktop auth).
+
+#### Step 4 — Real embassy embedded main
+- `#![no_std]` + `#![no_main]` via `cfg_attr(target_os = "none")`.
+  Host stub retained for `cargo check/test --workspace` on x86.
+- Embassy executor with `platform-cortex-m` + `executor-thread`.
+- 7 embassy tasks per `specs/embedded.toml [tasks]`:
+  gps (10Hz), baro (50Hz), imu (200Hz), estimator (200Hz drain),
+  telemetry (10Hz), inference (5Hz), command (idle).
+- Inter-task channels: `embassy_sync::channel::Channel` with
+  `CriticalSectionRawMutex`, capacity 8.
+- `HeapString`: fixed-capacity (64B) string for no_std error messages.
+- `TaggedReading`: sensor reading tagged with kind for the estimator.
+- Task config constants matching spec (GPS_RATE_HZ, IMU_RATE_HZ, etc.).
+- Panic handler with spin_loop. `try_spawn` helper avoids unwrap.
+- Cross-compiles clean: `cargo check --target thumbv7em-none-eabihf`.
+- New CI job: `embedded-check` (thumbv7em cross-compile).
+- +7 tests (16 total in themql-embedded).
+
+**Totals**: 325 tests pass workspace-wide (was 306). 21 specs (was 20).
 
 Four workstreams completing the Phase 3 follow-ups:
 

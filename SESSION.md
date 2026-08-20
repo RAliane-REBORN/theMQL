@@ -9,25 +9,44 @@ standing rules). When a session ends, fold the in-flight items into
 - Date: 2026-08-20
 - Mode: build
 - Agent: opencode (glm-5.2:cloud)
-- Branch: `feat/phase-2-heavy-dep-wiring` (stacked on the Phase 1 work)
+- Branch: `feat/phase-4-mqtt-auth-embedded` (off main, post PR #5 merge)
 
 ## Just-completed turn
 
-Phase 3 followups (Workstreams A/B/C/D) complete:
+Phase 4 — MQTT bridge, auth, and embedded embassy main (4 steps):
 
-1. **Workstream A — living docs refresh + PR #4 merge**: synced all 8
-   living docs to Phase 3's actual end state (removed stale placeholder
-   claims about EKF, HashValidator, cache backends). Closed BUG-0008
-   (sled temp test now stable). Committed `81af681`, pushed, merged PR
-   #4 to main (`4fee9d9`). Created `feat/phase-3-followups` branch.
-2. **Workstream B — real GraphQL subscriptions**: added
-   `GraphqlSubscriptionSource` trait (dyn-compatible) + impl for
-   `TokioSsePublisher`. `SseStreamAdapter` wraps `SseStream` as
-   `Stream<Item = serde_json::Value>` via a background task + mpsc
-   channel. `SubscriptionRoot::with_source(source)` + `subscribe()`
-   now returns a real live stream of events from the SSE publisher.
-   `SubscriptionRoot::default()` returns an error (no source). +2 tests
-   (subscription with source streams real events; without source
+1. **Step 1 — Fix machete + merge PR #5**: Removed unused `serde_json`
+   dev-dep from `themql-analysis`. Pushed, CI green (all 8 jobs), merged
+   PR #5 to main (`983e529`). Created `feat/phase-4-mqtt-auth-embedded`.
+2. **Step 2 — Wire MQTT bridge into serve**: Added `themql-mqtt` dep to
+   `themql-desktop`. `MqttToSseBridge` (MessageHandler) re-publishes
+   incoming MQTT messages to the SSE publisher via `broadcast()`.
+   `--enable-mqtt`, `--mqtt-host`, `--mqtt-port`, `--mqtt-client-id`
+   CLI args. Background tokio task drives rumqttc event loop.
+   `serve_sse_with_publisher` variant added to themql-sse for shared
+   `Arc<TokioSsePublisher>`. +3 tests.
+3. **Step 3 — Auth via better-auth + MQTT creds**: Created
+   `specs/auth.toml` (authn: GraphQL sessions via better-auth, MQTT
+   username/password; authz: role-based ACLs). Added `better-auth` 0.10
+   (axum + rustls) to workspace deps. `RumqttcConfig` gains
+   `username`/`password` fields + `with_credentials()` builder.
+   `--enable-auth` + `--auth-secret` (or `THEMQL_AUTH_SECRET` env var)
+   wires `BetterAuth` with `MemoryDatabaseAdapter` +
+   `EmailPasswordPlugin` into the serve router. `--mqtt-username`/
+   `--mqtt-password` for broker authn. +5 tests.
+4. **Step 4 — Real embassy embedded main**: `#![no_std]` +
+   `#![no_main]` via `cfg_attr(target_os = "none")`. Embassy executor
+   with `platform-cortex-m` + `executor-thread`. 7 embassy tasks per
+   spec: gps (10Hz), baro (50Hz), imu (200Hz), estimator (200Hz),
+   telemetry (10Hz), inference (5Hz), command. Inter-task channels via
+   `embassy_sync::channel::Channel<CriticalSectionRawMutex>`.
+   `HeapString` fixed-capacity (64B) string for no_std error messages.
+   Panic handler with spin_loop. Host stub retained for x86 tests.
+   Cross-compiles clean: `cargo check --target thumbv7em-none-eabihf`.
+   New CI job: `embedded-check`. +7 tests.
+
+**Totals**: 325 tests pass workspace-wide (was 306 at start of turn).
+Full validation green: fmt, clippy, test, machete, TOML sanity, ci_guard.
    returns error). 15 tests total in themql-graphql (was 13).
 3. **Workstream D — GitHub Actions CI**: created
    `.github/workflows/ci.yml` with 8 jobs: fmt, check, clippy, test,
@@ -68,27 +87,31 @@ themql-graphql, `serde_json` from themql-analysis (moved to dev-deps),
 - Phase 2 Stages 1-12 complete.
 - Phase 3 Stages 1-11 complete.
 - Phase 3 followups complete: real GraphQL subscriptions, GitHub
-  Actions CI, real themql-desktop subcommands. 306 tests pass
-  workspace-wide (default features). 20 crates, 20 specs.
+  Actions CI, real themql-desktop subcommands. PR #5 merged to main.
+- Phase 4 complete: MQTT-to-SSE bridge in serve, better-auth GraphQL
+  auth + MQTT broker credentials, real embassy embedded main.
+- 325 tests pass workspace-wide (default features). 20 crates, 21 specs.
 - Full validation green.
-- `tch-backend` feature compiles clean in themql-training/
-  themql-inference/themql-desktop (tests not run: libtorch OOM).
+- `tch-backend` feature compiles clean (tests not run: libtorch OOM).
+- Embedded binary cross-compiles for thumbv7em-none-eabihf.
 - No open bugs.
 
 ## In-flight work
 
-None. Phase 3 followups are complete. Changes are committed on
-`feat/phase-3-followups` branch, ready to push and open PR #5.
+None. Phase 4 is complete. Changes are committed on
+`feat/phase-4-mqtt-auth-embedded` branch, ready to push and open PR #6.
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. Run `tch-backend` feature tests once a beefier environment is
+1. Merge PR #6 to main after CI green.
+2. Run `tch-backend` feature tests once a beefier environment is
    available (>7.8GB RAM).
-2. Real `themql-embedded` embassy main (requires thumbv7em target).
-3. Transport-layer authn/authz policy (MQTT broker credentials, GraphQL
-   access control).
-4. Wire MQTT bridge into the `serve` subcommand (currently prints
-   "not yet wired" when `--enable-mqtt` is passed).
+3. Make themql-gnc/themql-estimation no_std compatible so the embedded
+   binary can call real EKF + HybridController (currently embassy tasks
+   stub the GNC/estimation logic).
+4. GraphQL field-level authz (subject-pattern ACLs per role).
+5. MQTT topic filter ACLs per client id.
+6. Fuzzing harness + secret-management policy.
 
 ## Open questions / blockers
 
