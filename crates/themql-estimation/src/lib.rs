@@ -19,8 +19,17 @@
 #![warn(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![warn(missing_docs)]
 #![allow(non_snake_case)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use nalgebra::{Quaternion, SMatrix, SVector, UnitQuaternion, Vector3, Vector4};
+#[cfg(not(feature = "std"))]
+use num_traits::real::Real;
 use thiserror::Error;
 
 /// State dimension — fixed at compile time per `specs/state_estimation.toml`.
@@ -180,6 +189,7 @@ pub enum EstimationError {
     InternalError(String),
 }
 
+#[cfg(feature = "std")]
 impl From<EstimationError> for themql_core::Error {
     fn from(e: EstimationError) -> Self {
         themql_core::Error::internal_error(e.to_string())
