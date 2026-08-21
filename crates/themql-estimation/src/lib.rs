@@ -187,12 +187,111 @@ pub enum EstimationError {
     /// Internal estimator failure.
     #[error("internal estimation error: {0}")]
     InternalError(String),
+    /// Estimator health check failed (NaN, Inf, covariance blow-up,
+    /// or innovation gating violation detected by
+    /// [`EstimatorHealth`]).
+    #[error("estimator health check failed: {reason}")]
+    HealthCheckFailed {
+        /// Why the health check failed.
+        reason: String,
+    },
 }
 
 #[cfg(feature = "std")]
 impl From<EstimationError> for themql_core::Error {
     fn from(e: EstimationError) -> Self {
         themql_core::Error::internal_error(e.to_string())
+    }
+}
+
+// ===========================================================================
+// EstimatorHealth — runtime failure detection for the EKF
+// ===========================================================================
+
+/// Maximum allowed innovation (measurement residual) magnitude.
+/// Innovations exceeding this are flagged as outliers (gating).
+const MAX_INNOVATION: f64 = 1.0e6;
+
+/// Runtime health checker for estimator state. Detects NaN, Inf,
+/// covariance blow-up, and innovation outliers per `SPEC.toml [safety]
+/// estimator_failure_must_be_detectable = true`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EstimatorHealth;
+
+impl EstimatorHealth {
+    /// Construct a new estimator health checker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Check the health of an `EstimatorState`.
+    ///
+    /// Verifies:
+    /// - All 21 state components are finite.
+    /// - Covariance trace is finite and below `COV_TRACE_LIMIT`.
+    /// - Covariance diagonal entries are non-negative.
+    /// - Quaternion norm is approximately 1.0.
+    ///
+    /// # Errors
+    /// Returns [`EstimationError::HealthCheckFailed`] on any
+    /// violation.
+    pub fn check_state(&self, state: &EstimatorState) -> Result<(), EstimationError> {
+        for i in 0..STATE_DIM {
+            if !state.x[i].is_finite() {
+                return Err(EstimationError::HealthCheckFailed {
+                    reason: format!("state[{i}] not finite"),
+                });
+            }
+        }
+        let trace = state.P.trace();
+        if !trace.is_finite() {
+            return Err(EstimationError::HealthCheckFailed {
+                reason: format!("covariance trace not finite: {trace}"),
+            });
+        }
+        if trace > COV_TRACE_LIMIT {
+            return Err(EstimationError::HealthCheckFailed {
+                reason: format!("covariance trace {trace} > limit {COV_TRACE_LIMIT}"),
+            });
+        }
+        for i in 0..STATE_DIM {
+            if state.P[(i, i)] < 0.0 {
+                return Err(EstimationError::HealthCheckFailed {
+                    reason: format!("covariance diagonal P[{i},{i}] negative"),
+                });
+            }
+        }
+        let q_norm = (state.x[6] * state.x[6]
+            + state.x[7] * state.x[7]
+            + state.x[8] * state.x[8]
+            + state.x[9] * state.x[9])
+        .sqrt();
+        if (q_norm - 1.0).abs() > 1e-6 {
+            return Err(EstimationError::HealthCheckFailed {
+                reason: format!("quaternion norm {q_norm} not unit"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Check the innovation magnitude for outlier gating.
+    ///
+    /// # Errors
+    /// Returns [`EstimationError::HealthCheckFailed`] if the innovation
+    /// magnitude exceeds `MAX_INNOVATION`.
+    pub fn check_innovation(&self, innovation: f64) -> Result<(), EstimationError> {
+        if !innovation.is_finite() {
+            return Err(EstimationError::HealthCheckFailed {
+                reason: format!("innovation not finite: {innovation}"),
+            });
+        }
+        if innovation.abs() > MAX_INNOVATION {
+            return Err(EstimationError::HealthCheckFailed {
+                reason: format!("innovation {innovation} exceeds gate {MAX_INNOVATION}"),
+            });
+        }
+        Ok(())
     }
 }
 

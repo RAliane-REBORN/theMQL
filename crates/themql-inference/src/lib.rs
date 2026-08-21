@@ -258,6 +258,80 @@ pub fn now_timestamp() -> Timestamp {
 }
 
 // ===========================================================================
+// infer_with_fallback — ML-degrade-to-EKF-only fallback
+// ===========================================================================
+
+/// Run inference with graceful degradation. If the engine returns any
+/// `InferenceError`, this function returns a zero-correction
+/// `InferenceOutput` with `confidence = 0.0`, effectively a no-op that
+/// lets the EKF continue alone. Per `specs/inference.toml [authority]`:
+/// `ml_failure_must_degrade_to_ekf_only = true`.
+///
+/// This is the augmentative-only authority pattern: ML never writes
+/// state directly; the `state_correction` from the ML model is applied
+/// by the EKF as a pseudo-measurement. When ML fails, the correction is
+/// zero and the EKF continues with its own deterministic prediction +
+/// sensor updates.
+///
+/// # Errors
+/// Never returns an error — ML failures are logged via the returned
+/// `InferenceOutcome` enum so the caller can decide whether to
+/// rollback the model.
+#[must_use]
+pub fn infer_with_fallback(
+    engine: &dyn InferenceEngine,
+    input: &InferenceInput,
+) -> InferenceOutcome {
+    match engine.infer(input) {
+        Ok(output) => InferenceOutcome::Success(output),
+        Err(e) => {
+            let latency_ns = 0;
+            InferenceOutcome::Degraded {
+                correction: InferenceOutput {
+                    state_correction: nalgebra::SVector::zeros(),
+                    confidence: 0.0,
+                    latency_ns,
+                },
+                error: e,
+            }
+        }
+    }
+}
+
+/// The outcome of [`infer_with_fallback`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum InferenceOutcome {
+    /// Inference succeeded.
+    Success(InferenceOutput),
+    /// ML failed and the EKF continues alone (zero correction).
+    Degraded {
+        /// The zero-correction fallback output.
+        correction: InferenceOutput,
+        /// The error that caused degradation.
+        error: InferenceError,
+    },
+}
+
+impl InferenceOutcome {
+    /// Extract the `InferenceOutput` regardless of whether ML succeeded
+    /// or degraded. On degradation, returns the zero-correction
+    /// fallback.
+    #[must_use]
+    pub fn into_output(self) -> InferenceOutput {
+        match self {
+            InferenceOutcome::Success(output) => output,
+            InferenceOutcome::Degraded { correction, .. } => correction,
+        }
+    }
+
+    /// Whether ML degraded to EKF-only.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, InferenceOutcome::Degraded { .. })
+    }
+}
+
+// ===========================================================================
 // TchInferenceEngine — tch-backed inference (behind `tch-backend` feature)
 // ===========================================================================
 
