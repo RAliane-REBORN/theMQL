@@ -5,6 +5,76 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 8: testing infrastructure (integration/property/bench)
+
+Second phase of the 7-phase sweep. Closes `SPEC.toml [quality]` gaps:
+`integration_tests_required = true`, `property_tests_required = true`,
+`benchmark_hot_paths = true`.
+
+#### 8.1 Integration tests (in `crates/<crate>/tests/` dirs)
+
+- `themql-cache/tests/tiered_flow.rs` — 4 tests: L4 sled promotes to
+  L1 on hit, invalidate removes from all tiers, disabled policy returns
+  miss, bypass policy skips read but writes through.
+- `themql-storage/tests/sled_round_trip.rs` — 5 tests: put/get
+  round-trip, delete, get-missing, query-by-key, overwrite.
+- `themql-graphql/tests/resolver_subscription_e2e.rs` — 2 tests:
+  GraphQL query through resolver bridge end-to-end, GraphQL
+  subscription streams events from SSE publisher.
+- `themql-desktop/tests/serve_boot.rs` — 2 tests: serve builds real
+  axum router without auth (POST /graphql), serve builds router with
+  SSE endpoint (GET /events). Uses `tower::ServiceExt::oneshot` for
+  router testing without TCP binding.
+
+#### 8.2 Property tests (via `proptest` workspace dep)
+
+- `themql-core/tests/subject_property.rs` — 7 property tests:
+  Subject round-trips through string, clone equals original, is
+  always concrete, Display equals as_str, pattern matches itself,
+  wildcard-multi matches any subpath, wildcard-one matches exactly
+  one segment.
+- `themql-query/tests/cache_key_property.rs` — 5 property tests:
+  CacheKeyer is deterministic, distinct for distinct subjects, hash_of
+  is deterministic, hash_of distinct for distinct input, Display is
+  64-char hex.
+- `themql-estimation/tests/ekf_property.rs` — 5 property tests (64
+  cases each): predict preserves covariance symmetry, predict
+  preserves quaternion norm, update_gps preserves covariance
+  symmetry, update_baro preserves covariance symmetry, predict
+  rejects nonpositive dt.
+- `themql-gnc/tests/hybrid_property.rs` — 2 property tests (64 cases
+  each): hybrid PID step produces finite output for bounded inputs,
+  hybrid step rejects nonpositive dt.
+
+#### 8.3 Benchmarks (via `criterion` workspace dep, `harness = false`)
+
+- `themql-estimation/benches/ekf_step.rs` — 3 benchmarks: ekf_predict,
+  ekf_predict_then_gps_update, ekf_predict_then_baro_update.
+- `themql-cache/benches/tiered.rs` — 5 benchmarks: l1_get_hit, l1_put,
+  l2_get_hit, tiered_l1_hit_async, tiered_l4_sled_hit_async.
+- `themql-graphql/benches/resolve.rs` — 1 benchmark:
+  graphql_resource_query.
+
+#### New workspace deps
+
+- `proptest = "1"` (dev-dep in core, query, estimation, gnc).
+- `criterion = { version = "0.5", features = ["async_tokio"] }` (dev-dep
+  in estimation, cache, graphql).
+- `tower = "0.5"` (dev-dep in desktop for router testing).
+
+#### Validation
+
+- `cargo fmt --check` — clean.
+- `cargo check --workspace --all-targets` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo test --workspace` — 397 tests pass (was 365; +32 from
+  integration + property tests). 0 failures.
+- `cargo deny check`, `cargo machete --with-metadata`, TOML sanity,
+  `scripts/ci_guard.py`, `cargo metadata`, embedded cross-compile
+  (thumbv7em-none-eabihf) — all green.
+- Benches compile clean (not run — `cargo bench` is a separate
+  invocation; verified via `cargo check --all-targets`).
+
 ### 2026-08-20 — Phase 7: doc + spec-deviation cleanup
 
 First phase of a 7-phase sweep (Phases 7-13) on a single branch

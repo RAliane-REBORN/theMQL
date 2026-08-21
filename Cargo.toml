@@ -98,6 +98,10 @@ futures-util = "0.3"
 # Auth
 better-auth = { version = "0.10", features = ["axum", "rustls"], default-features = false }
 
+# Testing
+proptest = "1"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
 # Internal crates — self-references for cross-crate deps via workspace=true
 themql-core = { path = "crates/themql-core" }
 themql-schema = { path = "crates/themql-schema" }

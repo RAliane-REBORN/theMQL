@@ -68,10 +68,9 @@ deliberate, not an oversight.
 
 - Name: theMQL (The Message Query Language)
 - Version: 0.1.0
-- Status: greenfield (Phase 7 complete — doc + spec-deviation cleanup:
-  RollbackHandle/InferenceError/TrainingError now match specs/inference.toml
-  and specs/training.toml exactly; stale HANDOVER/BUGS/MEMORY/SECURITY
-  refreshed to actual state; remaining gaps documented as Phase 8-13 scope)
+- Status: greenfield (Phase 8 complete — testing infrastructure:
+  integration tests in `tests/` dirs, property tests via `proptest`,
+  benchmarks via `criterion`; 397 tests pass workspace-wide)
 - Language: Rust
 - License: MIT
 - Repository: https://github.com/RAliane-REBORN/theMQL
@@ -121,19 +120,14 @@ deliberate, not an oversight.
 | themql-embedded | binary | SensorDriver trait, real EKF+HybridController pipeline, embassy tasks (TETANUS) | 19 |
 | themql-desktop | binary | Cli (clap), tokio main, authz wiring, MQTT ACL mapping, ratatui TUI | 19 |
 
-Total: 365 tests pass workspace-wide (default features) as of
-Phase 6 complete. Per-crate counts: analysis 12, artifact 22, cache 32,
-core 31, estimation 24, gnc 7, graphql 13, inference 6, message 4,
-mqtt 25, query 11, runtime 6, schema 6, sse 17, storage 31, telemetry
-14, training 6, transport 14, desktop 13, embedded 19. (Note: Phase 6
-added 24 tests across embedded sensors/mqtt and graphql authz; counts
-above are approximate — run `cargo test --workspace` for the exact
-current number.) The `tch-backend` feature in training/inference
-compiles clean and contains a real training loop (themql-training:
-MLP + Adam + MSE + TorchScript export) and a real model loading +
-forward pass (themql-inference: CModule load + forward_ts + deadline
-check + rollback); tests are not run (libtorch + RAM constraints in
-this environment).
+Total: 397 tests pass workspace-wide (default features) as of
+Phase 8 complete. Includes 365 original unit tests + 32 new
+integration and property tests. The `tch-backend` feature in
+training/inference compiles clean and contains a real training loop
+(themql-training: MLP + Adam + MSE + TorchScript export) and a real
+model loading + forward pass (themql-inference: CModule load +
+forward_ts + deadline check + rollback); tests are not run
+(libtorch + RAM constraints in this environment).
 
 ### Phase 3 progress (2026-08-20) — ALL STAGES COMPLETE
 

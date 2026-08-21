@@ -29,6 +29,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tower = "0.5"
 
 [features]
 tch-backend = ["dep:themql-training", "themql-training/tch-backend"]

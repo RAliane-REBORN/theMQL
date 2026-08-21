@@ -13,29 +13,41 @@ standing rules). When a session ends, fold the in-flight items into
 
 ## Just-completed turn
 
-Phase 7 — doc + spec-deviation cleanup:
+Phase 8 — testing infrastructure (integration/property/bench):
 
-- **7.1 Refresh stale docs**: HANDOVER.md, BUGS.md, MEMORY.md, SECURITY.md
-  updated to reflect actual Phase 6-complete state. Removed stale claims
-  about no_std GNC not done, authz/ACLs not implemented, GraphQL
-  subscriptions placeholder, desktop subcommands banner-only, WS role
-  defaults. Documented remaining gaps as Phase 8-13 scope in BUGS.md.
-- **7.2 Fix 3 spec deviations** in safety-critical crates:
-  - `themql-inference`: `RollbackHandle.previous_model: TrainedModel`
-    (was `Vec<u8>`); `restore() -> Result<TrainedModel, InferenceError>`
-    (was `Result<Vec<u8>, _>`). `InferenceError::ArtifactInvalid(
-    ArtifactError)` (was `String`); `BudgetExceeded { used:
-    ResourceBudget, limit: ResourceBudget }` (was `{ used_cpu, limit_cpu
-    }`). Added `AdaptationNotImplemented(String)` + `InternalError(
-    String)` variants for Phase 12 online-adaptation work.
-  - `themql-training`: `TrainingError::ArtifactEmissionFailed(
-    #[from] themql_artifact::ArtifactError)` (was `String`); the
-    `#[from]` attribute gives `?` ergonomics. The closure form at
-    `export_torchscript_bytes` call-site was updated to wrap strings in
-    `ArtifactError::ValidationFailed(String)`.
-- 365 tests pass workspace-wide (unchanged). Full validation green
-  (fmt, check, test, clippy). `tch-backend` feature compiles clean but
-  tests not run (libtorch C++ build OOM in 7.8GB env).
+- **8.1 Integration tests**: 4 test files in `crates/<crate>/tests/`
+  dirs: `themql-cache/tests/tiered_flow.rs` (4 tests: L4 sled promotes
+  to L1, invalidate removes from all, disabled policy misses, bypass
+  policy skips read but writes through), `themql-storage/tests/
+  sled_round_trip.rs` (5 tests: put/get, delete, missing, query-by-key,
+  overwrite), `themql-graphql/tests/resolver_subscription_e2e.rs` (2
+  tests: GraphQL query through resolver bridge, GraphQL subscription
+  streams events from SSE publisher), `themql-desktop/tests/serve_boot.rs`
+  (2 tests: POST /graphql returns 200, GET /events returns 200; uses
+  `tower::ServiceExt::oneshot`).
+- **8.2 Property tests**: 4 test files via `proptest` workspace dep:
+  `themql-core/tests/subject_property.rs` (7 properties: round-trip,
+  clone, is_concrete, Display, pattern-matches-self, wildcard-multi,
+  wildcard-one), `themql-query/tests/cache_key_property.rs` (5
+  properties: deterministic, distinct-subjects, hash_of-deterministic,
+  hash_of-distinct-input, Display-is-hex-64), `themql-estimation/tests/
+  ekf_property.rs` (5 properties × 64 cases: covariance symmetry after
+  predict/update_gps/update_baro, quaternion norm after predict,
+  nonpositive-dt rejection), `themql-gnc/tests/hybrid_property.rs` (2
+  properties × 64 cases: finite output for bounded inputs, nonpositive-dt
+  rejection).
+- **8.3 Benchmarks**: 3 bench dirs via `criterion` workspace dep:
+  `themql-estimation/benches/ekf_step.rs` (3 benches: predict,
+  predict+gps_update, predict+baro_update), `themql-cache/benches/
+  tiered.rs` (5 benches: l1_get_hit, l1_put, l2_get_hit,
+  tiered_l1_hit_async, tiered_l4_sled_hit_async), `themql-graphql/benches/
+  resolve.rs` (1 bench: graphql_resource_query).
+- New workspace deps: `proptest = "1"`, `criterion = { version = "0.5",
+  features = ["async_tokio"] }`, `tower = "0.5"` (desktop dev-dep only).
+- 397 tests pass workspace-wide (was 365; +32 from integration +
+  property tests). 0 failures. Full validation green: fmt, check,
+  clippy, test, deny, machete, TOML sanity, ci-guard, metadata,
+  embedded cross-compile (thumbv7em-none-eabihf).
 
 ## State of the repository
 

@@ -17,3 +17,4 @@ blake3.workspace = true
 
 [dev-dependencies]
 themql-core.workspace = true
+proptest.workspace = true

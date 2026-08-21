@@ -19,6 +19,19 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 8 testing infrastructure)
+
+Phase 8 (second phase of the 7-phase sweep on
+`feat/phase-7-13-comprehensive`) executed by the lead opencode agent
+directly; no subagents were spawned. All 3 sub-steps complete: (8.1)
+integration tests in `crates/<crate>/tests/` dirs (4 files, 13 tests);
+(8.2) property tests via `proptest` workspace dep (4 files, 19
+properties × 64 cases each); (8.3) benchmarks via `criterion` workspace
+dep (3 bench files, 9 benchmarks). New workspace deps: `proptest = "1"`,
+`criterion = { version = "0.5", features = ["async_tokio"] }`, `tower =
+"0.5"` (desktop dev-dep only). 397 tests pass workspace-wide (was 365;
++32).
+
 ### 2026-08-20 — no subagents this turn (Phase 7 doc + spec-deviation cleanup)
 
 Phase 7 (first phase of the 7-phase sweep on
