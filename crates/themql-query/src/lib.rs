@@ -23,6 +23,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -231,6 +232,128 @@ pub trait Batcher: Send + Sync {
 }
 
 // ===========================================================================
+// QueryCache — minimal cache interface for DefaultQueryExecutor
+// ===========================================================================
+
+/// Minimal cache interface that [`DefaultQueryExecutor`] consults.
+///
+/// This is intentionally narrower than `themql_cache::Cache` so
+/// `themql-query` does not need a hard dep on `themql-cache` (which
+/// would create a circular dependency). An adapter blanket-impl is
+/// provided in `themql-cache` for any `Cache` that stores
+/// `CacheEntry`-like values.
+#[allow(async_fn_in_trait)]
+pub trait QueryCache: Send + Sync + Clone + 'static {
+    /// Look up `key`. Returns `Some(Response)` on hit, `None` on miss.
+    ///
+    /// # Errors
+    /// Returns [`Error`] only on a cache fault (not on a miss).
+    fn get(&self, key: &CacheKey) -> impl Future<Output = Result<Option<Response>, Error>>;
+
+    /// Write `response` to the cache under `key`.
+    ///
+    /// # Errors
+    /// Returns [`Error`] on write failure.
+    fn put(&self, key: CacheKey, response: Response) -> impl Future<Output = Result<(), Error>>;
+}
+
+// ===========================================================================
+// DefaultQueryExecutor — concrete QueryExecutor orchestrator
+// ===========================================================================
+
+/// Concrete [`QueryExecutor`] orchestrator. Wraps a [`Resolver`] with:
+///
+/// - Deadline check (from `Context.deadline`)
+/// - Cancellation check (from `Context.cancellation`)
+/// - Optional cache read/write-through (via [`QueryCache`])
+/// - Optional cache-key derivation (via [`CacheKeyer`])
+///
+/// Per `specs/query.toml [api.QueryExecutor]`, the executor always
+/// returns `themql_core::Error` to callers; `QueryError` is the
+/// internal representation.
+pub struct DefaultQueryExecutor<C>
+where
+    C: QueryCache + Send + Sync + 'static,
+{
+    /// The underlying resolver.
+    pub resolver: Arc<dyn Resolver>,
+    /// Optional cache backend.
+    pub cache: Option<C>,
+    /// Cache-key derivation. Defaults to `DefaultCacheKeyer` if `cache`
+    /// is `Some`.
+    pub keyer: DefaultCacheKeyer,
+}
+
+impl<C> DefaultQueryExecutor<C>
+where
+    C: QueryCache + Send + Sync + 'static,
+{
+    /// Construct an executor with a resolver and no cache.
+    #[must_use]
+    pub fn new(resolver: Arc<dyn Resolver>) -> Self {
+        Self {
+            resolver,
+            cache: None,
+            keyer: DefaultCacheKeyer::new(),
+        }
+    }
+
+    /// Construct an executor with a resolver and a cache backend.
+    #[must_use]
+    pub fn with_cache(resolver: Arc<dyn Resolver>, cache: C) -> Self {
+        Self {
+            resolver,
+            cache: Some(cache),
+            keyer: DefaultCacheKeyer::new(),
+        }
+    }
+}
+
+impl<C> QueryExecutor for DefaultQueryExecutor<C>
+where
+    C: QueryCache + Send + Sync + 'static,
+{
+    fn execute(
+        &self,
+        query: &Query,
+        ctx: &Context,
+    ) -> impl Future<Output = Result<Response, Error>> {
+        let resolver = Arc::clone(&self.resolver);
+        let cache = self.cache.clone();
+        let keyer = self.keyer;
+        let query_clone = query.clone();
+        let ctx_clone = ctx.clone();
+        async move {
+            if ctx.cancellation.is_cancelled() {
+                return Err(Error::timeout("cancelled"));
+            }
+            if let Some(deadline) = &ctx.deadline {
+                let now = themql_core::Timestamp::now_monotonic();
+                if deadline.is_expired(&now) {
+                    return Err(Error::timeout("deadline expired"));
+                }
+            }
+            if let Some(cache) = &cache {
+                if ctx.cache_policy.enabled && !ctx.cache_policy.bypass {
+                    let key = keyer.key(&query_clone);
+                    if let Some(response) = cache.get(&key).await? {
+                        return Ok(response);
+                    }
+                }
+            }
+            let response = resolver.resolve(&query_clone, &ctx_clone).await?;
+            if let Some(cache) = &cache {
+                if ctx.cache_policy.enabled {
+                    let key = keyer.key(&query_clone);
+                    let _ = cache.put(key, response.clone()).await;
+                }
+            }
+            Ok(response)
+        }
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -361,5 +484,102 @@ mod tests {
         let e: Error = QueryError::ResolverReturned(inner.clone()).into();
         assert_eq!(e.code, ErrorCode::ResolverError);
         assert_eq!(e.message, "boom");
+    }
+
+    // --- DefaultQueryExecutor tests ----------------------------------------
+
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    struct StubResolver;
+
+    impl Resolver for StubResolver {
+        fn resolve<'a>(
+            &'a self,
+            query: &'a Query,
+            _ctx: &'a Context,
+        ) -> Pin<Box<dyn Future<Output = Result<Response, Error>> + Send + 'a>> {
+            let subject = query.resource.subject.as_str();
+            Box::pin(async move {
+                Ok(Response::ok(
+                    themql_core::ResponseValue::Json(serde_json::json!({"subject": subject})),
+                    themql_core::CorrelationId::new(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn default_executor_invokes_resolver_on_cache_miss() {
+        let resolver: Arc<dyn Resolver> = Arc::new(StubResolver);
+        let executor: DefaultQueryExecutor<NoopCache> = DefaultQueryExecutor::new(resolver);
+        let q = query_with_subject("vehicle.sensors.imu");
+        let ctx = Context::default();
+        let response = executor.execute(&q, &ctx).await.expect("execute");
+        assert!(response.is_ok());
+    }
+
+    #[tokio::test]
+    async fn default_executor_returns_timeout_on_cancelled_context() {
+        let resolver: Arc<dyn Resolver> = Arc::new(StubResolver);
+        let executor: DefaultQueryExecutor<NoopCache> = DefaultQueryExecutor::new(resolver);
+        let q = query_with_subject("vehicle.sensors.imu");
+        let mut ctx = Context::default();
+        ctx.cancellation.cancel();
+        let result = executor.execute(&q, &ctx).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::Timeout);
+    }
+
+    #[derive(Clone, Default)]
+    struct NoopCache;
+
+    impl QueryCache for NoopCache {
+        fn get(&self, _key: &CacheKey) -> impl Future<Output = Result<Option<Response>, Error>> {
+            std::future::ready(Ok(None))
+        }
+        fn put(
+            &self,
+            _key: CacheKey,
+            _response: Response,
+        ) -> impl Future<Output = Result<(), Error>> {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn default_executor_with_cache_writes_through_on_miss() {
+        let resolver: Arc<dyn Resolver> = Arc::new(StubResolver);
+        let cache = NoopCache;
+        let executor = DefaultQueryExecutor::with_cache(resolver, cache);
+        let q = query_with_subject("vehicle.sensors.gps");
+        let ctx = Context::default();
+        let response = executor.execute(&q, &ctx).await.expect("execute");
+        assert!(response.is_ok());
+    }
+
+    #[tokio::test]
+    async fn default_executor_bypass_skips_cache_read() {
+        let resolver: Arc<dyn Resolver> = Arc::new(StubResolver);
+        let cache = NoopCache;
+        let executor = DefaultQueryExecutor::with_cache(resolver, cache);
+        let q = query_with_subject("vehicle.sensors.baro");
+        let mut ctx = Context::default();
+        ctx.cache_policy.bypass = true;
+        let response = executor.execute(&q, &ctx).await.expect("execute");
+        assert!(response.is_ok());
+    }
+
+    #[tokio::test]
+    async fn default_executor_disabled_cache_skips_read_and_write() {
+        let resolver: Arc<dyn Resolver> = Arc::new(StubResolver);
+        let cache = NoopCache;
+        let executor = DefaultQueryExecutor::with_cache(resolver, cache);
+        let q = query_with_subject("vehicle.sensors.imu");
+        let mut ctx = Context::default();
+        ctx.cache_policy.enabled = false;
+        let response = executor.execute(&q, &ctx).await.expect("execute");
+        assert!(response.is_ok());
     }
 }

@@ -19,6 +19,18 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 9 core runtime closures)
+
+Phase 9 (third phase of the 7-phase sweep on
+`feat/phase-7-13-comprehensive`) executed by the lead opencode agent
+directly; no subagents were spawned. All 5 sub-steps complete: (9.1)
+DefaultQueryExecutor orchestrator in themql-query with QueryCache
+trait + 5 tests; (9.2) real EmbassyRuntime::sleep via embassy_time
+(embassy-time added to embedded feature); (9.3) StubThedafAdapter in
+themql-analysis; (9.4) MQTT retained messages via publish_retained
+on MqttPublisher trait; (9.5) apalis dep + JobQueue stub trait +
+InMemoryJobQueue in themql-desktop. 402 tests pass (was 397; +5).
+
 ### 2026-08-20 — no subagents this turn (Phase 8 testing infrastructure)
 
 Phase 8 (second phase of the 7-phase sweep on

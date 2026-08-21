@@ -191,6 +191,37 @@ pub trait ThedafAdapter: Send + Sync {
     fn list_legacy_datasets(&self) -> impl Future<Output = Result<Vec<String>, AnalysisError>>;
 }
 
+/// Stub implementation of [`ThedafAdapter`]. All operations return
+/// `AnalysisError::ThedafError` indicating the legacy adapter is not
+/// configured. This provides a concrete type consumers can compose
+/// against while the real theDAF integration is future work.
+#[derive(Debug, Clone, Default)]
+pub struct StubThedafAdapter;
+
+impl StubThedafAdapter {
+    /// Construct a new stub adapter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ThedafAdapter for StubThedafAdapter {
+    #[allow(clippy::unused_async_trait_impl)]
+    async fn fetch_legacy(&self, _query: &str) -> Result<DataFrame, AnalysisError> {
+        Err(AnalysisError::ThedafError(
+            "thedaf adapter not configured: no legacy store connected".to_string(),
+        ))
+    }
+
+    #[allow(clippy::unused_async_trait_impl)]
+    async fn list_legacy_datasets(&self) -> Result<Vec<String>, AnalysisError> {
+        Err(AnalysisError::ThedafError(
+            "thedaf adapter not configured: no legacy store connected".to_string(),
+        ))
+    }
+}
+
 // ===========================================================================
 // Error
 // ===========================================================================

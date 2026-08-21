@@ -108,6 +108,19 @@ pub trait MqttPublisher: Send + Sync {
         topic: &Subject,
         payload: &Message,
     ) -> impl Future<Output = Result<(), MqttError>>;
+
+    /// Publish a `Message` with the MQTT retained flag set. The broker
+    /// stores the last retained message per topic and delivers it to
+    /// new subscribers immediately. Used for last-known-value telemetry
+    /// per `specs/mqtt.toml [topics] retained`.
+    ///
+    /// # Errors
+    /// Returns [`MqttError`] if the publish fails.
+    fn publish_retained(
+        &self,
+        topic: &Subject,
+        payload: &Message,
+    ) -> impl Future<Output = Result<(), MqttError>>;
 }
 
 /// Read-only subscriber for telemetry acquisition / command reception.
@@ -607,6 +620,22 @@ impl MqttPublisher for RumqttcTransport {
         let bytes = encode_message(payload)?;
         self.client
             .publish(topic_str, RumqttcQos::AtLeastOnce, false, bytes)
+            .await
+            .map_err(MqttError::from)
+    }
+
+    async fn publish_retained(&self, topic: &Subject, payload: &Message) -> Result<(), MqttError> {
+        let topic_str = subject_to_topic(topic);
+        if let Some(acl) = &self.acl {
+            if !acl.permits(AclAction::Publish, &topic_str) {
+                return Err(MqttError::PublishFailed(format!(
+                    "ACL denied publish on topic '{topic_str}'"
+                )));
+            }
+        }
+        let bytes = encode_message(payload)?;
+        self.client
+            .publish(topic_str, RumqttcQos::AtLeastOnce, true, bytes)
             .await
             .map_err(MqttError::from)
     }

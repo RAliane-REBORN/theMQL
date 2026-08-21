@@ -5,6 +5,65 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 9: core runtime closures
+
+Third phase of the 7-phase sweep. Closes several mid-size spec gaps.
+
+#### 9.1 DefaultQueryExecutor orchestrator (themql-query)
+
+- New `QueryCache` trait: minimal `get`/`put` interface for
+  `DefaultQueryExecutor`. Avoids circular dep on `themql-cache`
+  (which depends on `themql-query` for `CacheKey`). An adapter
+  blanket-impl can be provided in `themql-cache` for any `Cache` that
+  stores `CacheEntry`-like values.
+- New `DefaultQueryExecutor<C: QueryCache>`: wraps `Arc<dyn
+  Resolver>`, checks `Context.cancellation.is_cancelled()` →
+  `Error::timeout`, checks `Context.deadline.is_expired(now)` →
+  `Error::timeout`, optional cache read (if `cache_policy.enabled`
+  and not `bypass`), invokes `Resolver::resolve`, optional cache
+  write-through on miss. Uses `DefaultCacheKeyer` for key derivation.
+- +5 tests: invoke-resolver-on-miss, timeout-on-cancelled,
+  write-through-on-miss, bypass-skips-cache-read,
+  disabled-skips-read-and-write.
+
+#### 9.2 Real EmbassyRuntime::sleep (themql-runtime)
+
+- Replaced `std::future::pending()` stub with
+  `embassy_time::Timer::after(embassy_time::Duration::from_micros(...))`.
+- Added `embassy-time` to the `embedded` feature in
+  `themql-runtime/Cargo.toml`.
+
+#### 9.3 StubThedafAdapter (themql-analysis)
+
+- Concrete impl of `ThedafAdapter` returning
+  `AnalysisError::ThedafError("thedaf adapter not configured")` for
+  both `fetch_legacy` and `list_legacy_datasets`. Gives consumers a
+  type to compose against while real theDAF integration is future work.
+
+#### 9.4 MQTT retained messages (themql-mqtt)
+
+- Added `publish_retained` method to `MqttPublisher` trait. The
+  `RumqttcTransport` impl passes `retain=true` to rumqttc
+  `publish()`. Per `specs/mqtt.toml [topics] retained = "supported
+  for last-known-value telemetry"`.
+
+#### 9.5 Apalis queue stub (themql-desktop)
+
+- Added `apalis.workspace = true` dep. New `JobQueue` trait
+  (`enqueue`/`pending_count`) + `InMemoryJobQueue` stub impl
+  (`Mutex<Vec>`). Real apalis integration (persistent storage,
+  workers, retries) is future work.
+
+#### Validation
+
+- `cargo fmt --check`, `cargo check --workspace --all-targets`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (402 tests, was 397; +5 from
+  QueryExecutor tests), `cargo deny check`, `cargo machete`,
+  TOML sanity, `scripts/ci_guard.py`, `cargo metadata`, embedded
+  cross-compile (thumbv7em-none-eabihf) — all green.
+- No `unsafe` introduced.
+
 ### 2026-08-20 — Phase 8: testing infrastructure (integration/property/bench)
 
 Second phase of the 7-phase sweep. Closes `SPEC.toml [quality]` gaps:

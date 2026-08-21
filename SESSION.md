@@ -13,41 +13,35 @@ standing rules). When a session ends, fold the in-flight items into
 
 ## Just-completed turn
 
-Phase 8 — testing infrastructure (integration/property/bench):
+Phase 9 — core runtime closures:
 
-- **8.1 Integration tests**: 4 test files in `crates/<crate>/tests/`
-  dirs: `themql-cache/tests/tiered_flow.rs` (4 tests: L4 sled promotes
-  to L1, invalidate removes from all, disabled policy misses, bypass
-  policy skips read but writes through), `themql-storage/tests/
-  sled_round_trip.rs` (5 tests: put/get, delete, missing, query-by-key,
-  overwrite), `themql-graphql/tests/resolver_subscription_e2e.rs` (2
-  tests: GraphQL query through resolver bridge, GraphQL subscription
-  streams events from SSE publisher), `themql-desktop/tests/serve_boot.rs`
-  (2 tests: POST /graphql returns 200, GET /events returns 200; uses
-  `tower::ServiceExt::oneshot`).
-- **8.2 Property tests**: 4 test files via `proptest` workspace dep:
-  `themql-core/tests/subject_property.rs` (7 properties: round-trip,
-  clone, is_concrete, Display, pattern-matches-self, wildcard-multi,
-  wildcard-one), `themql-query/tests/cache_key_property.rs` (5
-  properties: deterministic, distinct-subjects, hash_of-deterministic,
-  hash_of-distinct-input, Display-is-hex-64), `themql-estimation/tests/
-  ekf_property.rs` (5 properties × 64 cases: covariance symmetry after
-  predict/update_gps/update_baro, quaternion norm after predict,
-  nonpositive-dt rejection), `themql-gnc/tests/hybrid_property.rs` (2
-  properties × 64 cases: finite output for bounded inputs, nonpositive-dt
-  rejection).
-- **8.3 Benchmarks**: 3 bench dirs via `criterion` workspace dep:
-  `themql-estimation/benches/ekf_step.rs` (3 benches: predict,
-  predict+gps_update, predict+baro_update), `themql-cache/benches/
-  tiered.rs` (5 benches: l1_get_hit, l1_put, l2_get_hit,
-  tiered_l1_hit_async, tiered_l4_sled_hit_async), `themql-graphql/benches/
-  resolve.rs` (1 bench: graphql_resource_query).
-- New workspace deps: `proptest = "1"`, `criterion = { version = "0.5",
-  features = ["async_tokio"] }`, `tower = "0.5"` (desktop dev-dep only).
-- 397 tests pass workspace-wide (was 365; +32 from integration +
-  property tests). 0 failures. Full validation green: fmt, check,
-  clippy, test, deny, machete, TOML sanity, ci-guard, metadata,
-  embedded cross-compile (thumbv7em-none-eabihf).
+- **9.1 `DefaultQueryExecutor` orchestrator** in `themql-query`:
+  `DefaultQueryExecutor<C: QueryCache>` wraps `Arc<dyn Resolver>`,
+  checks `Context.cancellation.is_cancelled()`, checks
+  `Context.deadline.is_expired(now)`, optional cache read via
+  `QueryCache` trait (new, minimal — `get`/`put`), optional cache
+  write-through on miss. `QueryCache` is a new trait that avoids a
+  circular dep on `themql-cache`. `DefaultCacheKeyer` used for key
+  derivation. +5 tests (invoke on miss, timeout on cancelled,
+  write-through, bypass skips read, disabled skips read+write).
+- **9.2 Real `EmbassyRuntime::sleep`** in `themql-runtime`:
+  replaced `std::future::pending()` with
+  `embassy_time::Timer::after(embassy_time::Duration::from_micros(...))`.
+  Added `embassy-time` to the `embedded` feature in Cargo.toml.
+- **9.3 `StubThedafAdapter`** in `themql-analysis`: concrete impl of
+  `ThedafAdapter` returning `AnalysisError::ThedafError("thedaf
+  adapter not configured")` for both `fetch_legacy` and
+  `list_legacy_datasets`. Gives consumers a type to compose against.
+- **9.4 MQTT retained messages** in `themql-mqtt`: added
+  `publish_retained` method to `MqttPublisher` trait. The
+  `RumqttcTransport` impl passes `retain=true` to the rumqttc
+  `publish()` call. Per `specs/mqtt.toml [topics] retained`.
+- **9.5 Apalis queue stub** in `themql-desktop`: added `apalis` dep,
+  `JobQueue` trait (`enqueue`/`pending_count`), `InMemoryJobQueue`
+  stub impl (`Mutex<Vec>`). Real apalis integration (persistent
+  storage, workers, retries) is future work.
+- 402 tests pass workspace-wide (was 397; +5 from QueryExecutor
+  tests). Full validation green.
 
 ## State of the repository
 

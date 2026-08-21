@@ -68,9 +68,10 @@ deliberate, not an oversight.
 
 - Name: theMQL (The Message Query Language)
 - Version: 0.1.0
-- Status: greenfield (Phase 8 complete — testing infrastructure:
-  integration tests in `tests/` dirs, property tests via `proptest`,
-  benchmarks via `criterion`; 397 tests pass workspace-wide)
+- Status: greenfield (Phase 9 complete — core runtime closures:
+  DefaultQueryExecutor orchestrator, real EmbassyRuntime::sleep,
+  StubThedafAdapter, MQTT retained messages, apalis JobQueue stub;
+  402 tests pass workspace-wide)
 - Language: Rust
 - License: MIT
 - Repository: https://github.com/RAliane-REBORN/theMQL
@@ -120,9 +121,8 @@ deliberate, not an oversight.
 | themql-embedded | binary | SensorDriver trait, real EKF+HybridController pipeline, embassy tasks (TETANUS) | 19 |
 | themql-desktop | binary | Cli (clap), tokio main, authz wiring, MQTT ACL mapping, ratatui TUI | 19 |
 
-Total: 397 tests pass workspace-wide (default features) as of
-Phase 8 complete. Includes 365 original unit tests + 32 new
-integration and property tests. The `tch-backend` feature in
+Total: 402 tests pass workspace-wide (default features) as of
+Phase 9 complete. The `tch-backend` feature in
 training/inference compiles clean and contains a real training loop
 (themql-training: MLP + Adam + MSE + TorchScript export) and a real
 model loading + forward pass (themql-inference: CModule load +
