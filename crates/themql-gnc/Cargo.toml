@@ -16,3 +16,7 @@ std = ["dep:themql-core", "thiserror/std"]
 themql-core = { workspace = true, optional = true }
 nalgebra = { version = "0.35", default-features = false, features = ["libm"] }
 thiserror = { version = "2", default-features = false }
+
+[dev-dependencies]
+themql-core.workspace = true
+proptest.workspace = true

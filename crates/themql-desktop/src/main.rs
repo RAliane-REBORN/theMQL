@@ -819,6 +819,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ===========================================================================
+// JobQueue — stub trait for background job processing (apalis wrapper)
+// ===========================================================================
+
+/// Stub trait for background job processing, wrapping `apalis` per
+/// `specs/runtime.toml [queue] implementation = "apalis"`. The
+/// concrete implementation is future work; this trait gives consumers
+/// a surface to compose against.
+pub trait JobQueue: Send + Sync {
+    /// Enqueue a background job identified by `name` with `payload`.
+    ///
+    /// # Errors
+    /// Returns `themql_core::Error` if the job cannot be enqueued.
+    fn enqueue(
+        &self,
+        name: &str,
+        payload: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), themql_core::Error>> + Send + '_>,
+    >;
+
+    /// Number of pending jobs in the queue.
+    fn pending_count(&self) -> usize;
+}
+
+/// In-memory stub `JobQueue` that stores enqueued jobs in a `Mutex<Vec>`.
+/// Real apalis integration (with persistent storage, workers, retries)
+/// is future work.
+pub struct InMemoryJobQueue {
+    jobs: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+}
+
+impl InMemoryJobQueue {
+    /// Construct a new empty in-memory job queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            jobs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Default for InMemoryJobQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JobQueue for InMemoryJobQueue {
+    fn enqueue(
+        &self,
+        name: &str,
+        payload: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), themql_core::Error>> + Send + '_>,
+    > {
+        let name_owned = name.to_string();
+        Box::pin(async move {
+            let mut jobs = self
+                .jobs
+                .lock()
+                .map_err(|_| themql_core::Error::internal_error("job queue lock poisoned"))?;
+            jobs.push((name_owned, payload));
+            Ok(())
+        })
+    }
+
+    fn pending_count(&self) -> usize {
+        match self.jobs.lock() {
+            Ok(jobs) => jobs.len(),
+            Err(_) => 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

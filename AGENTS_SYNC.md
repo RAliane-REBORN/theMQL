@@ -19,6 +19,45 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## Log
 
+### 2026-08-20 — no subagents this turn (Phase 9 core runtime closures)
+
+Phase 9 (third phase of the 7-phase sweep on
+`feat/phase-7-13-comprehensive`) executed by the lead opencode agent
+directly; no subagents were spawned. All 5 sub-steps complete: (9.1)
+DefaultQueryExecutor orchestrator in themql-query with QueryCache
+trait + 5 tests; (9.2) real EmbassyRuntime::sleep via embassy_time
+(embassy-time added to embedded feature); (9.3) StubThedafAdapter in
+themql-analysis; (9.4) MQTT retained messages via publish_retained
+on MqttPublisher trait; (9.5) apalis dep + JobQueue stub trait +
+InMemoryJobQueue in themql-desktop. 402 tests pass (was 397; +5).
+
+### 2026-08-20 — no subagents this turn (Phase 8 testing infrastructure)
+
+Phase 8 (second phase of the 7-phase sweep on
+`feat/phase-7-13-comprehensive`) executed by the lead opencode agent
+directly; no subagents were spawned. All 3 sub-steps complete: (8.1)
+integration tests in `crates/<crate>/tests/` dirs (4 files, 13 tests);
+(8.2) property tests via `proptest` workspace dep (4 files, 19
+properties × 64 cases each); (8.3) benchmarks via `criterion` workspace
+dep (3 bench files, 9 benchmarks). New workspace deps: `proptest = "1"`,
+`criterion = { version = "0.5", features = ["async_tokio"] }`, `tower =
+"0.5"` (desktop dev-dep only). 397 tests pass workspace-wide (was 365;
++32).
+
+### 2026-08-20 — no subagents this turn (Phase 7 doc + spec-deviation cleanup)
+
+Phase 7 (first phase of the 7-phase sweep on
+`feat/phase-7-13-comprehensive`) executed by the lead opencode agent
+directly; no subagents were spawned. All 2 sub-steps complete: (7.1)
+refreshed stale HANDOVER/BUGS/MEMORY/SECURITY docs to actual Phase
+6-complete state and documented remaining gaps as Phase 8-13 scope;
+(7.2) fixed 3 spec deviations in safety-critical crates
+(`RollbackHandle.previous_model: TrainedModel`,
+`InferenceError::ArtifactInvalid(ArtifactError)`,
+`InferenceError::BudgetExceeded { used, limit: ResourceBudget }`,
+`TrainingError::ArtifactEmissionFailed(ArtifactError)`). 12 tests pass
+in the two affected crates.
+
 ### 2026-08-20 — no subagents this turn (Rust 1.98.0 toolchain drift fix)
 
 Toolchain-compatibility fix executed by the lead opencode agent

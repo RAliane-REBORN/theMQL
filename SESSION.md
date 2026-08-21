@@ -9,42 +9,39 @@ standing rules). When a session ends, fold the in-flight items into
 - Date: 2026-08-20
 - Mode: build
 - Agent: opencode (glm-5.2:cloud)
-- Branch: `feat/phase-5-no_std-authz` (off main, post PR #6 merge)
+- Branch: `feat/phase-7-13-comprehensive` (off main, post PR #8 merge)
 
 ## Just-completed turn
 
-Rust 1.98.0 toolchain drift fix (unblocked PR #7 CI):
+Phase 9 — core runtime closures:
 
-Rust 1.98.0 stable (88d9e12ae 2026-08-18) dropped today during PR #7
-review and introduced two new clippy lints and rustfmt formatting drift.
-CI on PR #7 went UNSTABLE: `cargo fmt` and `cargo clippy` failed (both
-ran twice due to duplicate-workflow push). All other 13 check runs pass.
-
-### Fixes applied
-
-1. **rustfmt drift** (2 files, auto-fixed via `cargo fmt`):
-   - `crates/themql-embedded/src/main.rs` — `use embedded_alloc::TlsfHeap`
-     import reorder in `mod embedded`.
-   - `crates/themql-mqtt/src/lib.rs:242` — `matches!` arm line break.
-
-2. **clippy `unused_async_trait_impl`** (5 impl blocks across 4 crates):
-   Rust 1.98.0 flags `async fn` in trait impls with no `.await`. The
-   traits all use `fn -> impl Future<...>` signatures, so `async fn`
-   impls are sugar. Tried the `fn -> impl Future + async move` refactor
-   first but it triggers the opposite lint `manual_async_fn` — clippy
-   1.98.0 has conflicting lints here. Cleanest fix: keep `async fn` and
-   add `#[allow(clippy::unused_async_trait_impl)]` on each impl block.
-   Affected blocks:
-   - `themql-storage`: `impl Storage for SledStorage` (4 methods).
-   - `themql-graphql`: `impl Guard for RoleGuard` (1 method).
-   - `themql-graphql` tests: `impl ResolverBoxed for StubResolver`.
-   - `themql-cache`: `impl Cache for TieredCache<S>` (invalidate_pattern).
-   - `themql-cache` tests: `impl Storage for InMemoryStorage` (4 methods).
-   - `themql-desktop`: `impl ResolverBoxed for DesktopResolver`.
-
-**Totals**: 341 tests pass workspace-wide (unchanged). Full validation
-green: fmt, check, test (341), clippy, deny, machete, toml-sanity,
-metadata.
+- **9.1 `DefaultQueryExecutor` orchestrator** in `themql-query`:
+  `DefaultQueryExecutor<C: QueryCache>` wraps `Arc<dyn Resolver>`,
+  checks `Context.cancellation.is_cancelled()`, checks
+  `Context.deadline.is_expired(now)`, optional cache read via
+  `QueryCache` trait (new, minimal — `get`/`put`), optional cache
+  write-through on miss. `QueryCache` is a new trait that avoids a
+  circular dep on `themql-cache`. `DefaultCacheKeyer` used for key
+  derivation. +5 tests (invoke on miss, timeout on cancelled,
+  write-through, bypass skips read, disabled skips read+write).
+- **9.2 Real `EmbassyRuntime::sleep`** in `themql-runtime`:
+  replaced `std::future::pending()` with
+  `embassy_time::Timer::after(embassy_time::Duration::from_micros(...))`.
+  Added `embassy-time` to the `embedded` feature in Cargo.toml.
+- **9.3 `StubThedafAdapter`** in `themql-analysis`: concrete impl of
+  `ThedafAdapter` returning `AnalysisError::ThedafError("thedaf
+  adapter not configured")` for both `fetch_legacy` and
+  `list_legacy_datasets`. Gives consumers a type to compose against.
+- **9.4 MQTT retained messages** in `themql-mqtt`: added
+  `publish_retained` method to `MqttPublisher` trait. The
+  `RumqttcTransport` impl passes `retain=true` to the rumqttc
+  `publish()` call. Per `specs/mqtt.toml [topics] retained`.
+- **9.5 Apalis queue stub** in `themql-desktop`: added `apalis` dep,
+  `JobQueue` trait (`enqueue`/`pending_count`), `InMemoryJobQueue`
+  stub impl (`Mutex<Vec>`). Real apalis integration (persistent
+  storage, workers, retries) is future work.
+- 402 tests pass workspace-wide (was 397; +5 from QueryExecutor
+  tests). Full validation green.
 
 ## State of the repository
 
@@ -56,35 +53,44 @@ metadata.
   embassy embedded main.
 - Phase 5 complete: no_std gnc/estimation, real EKF+controller in
   embedded binary, GraphQL authz guards + MQTT topic ACLs.
-- Rust 1.98.0 toolchain drift fixed (this turn).
-- 341 tests pass workspace-wide (default features). 20 crates, 21 specs.
+- Phase 6 complete: per-request authz + dep audit + real sensors +
+  embedded MQTT (PR #8 merged).
+- Phase 7 complete: doc + spec-deviation cleanup.
+- 365 tests pass workspace-wide (default features). 20 crates, 21 specs.
 - Full validation green.
 - `tch-backend` feature compiles clean (tests not run: libtorch OOM).
 - Embedded binary cross-compiles for thumbv7em-none-eabihf with real
-  EKF + HybridController.
+  EKF + HybridController + sensor drivers + minimq MQTT payload
+  formatting.
 - No open bugs.
 
 ## In-flight work
 
-PR #7 (`feat/phase-5-no_std-authz`) CI was UNSTABLE due to Rust 1.98.0
-drift. Fixup commit ready to push to retrigger CI.
+Phase 7 of a 7-phase sweep (Phases 7-13) on
+`feat/phase-7-13-comprehensive`. Phases 8-13 pending: testing
+infrastructure, core runtime closures, safety-critical mechanisms,
+embedded networking, training pipeline completeness, desktop dioxus UI +
+pnpm toolchain.
 
 ## Next plausible actions (suggestions, not commitments)
 
-1. Push fixup, wait for PR #7 CI green, then merge with `--squash --delete-branch`.
-2. Run `tch-backend` feature tests once a beefier environment is
-   available (>7.8GB RAM).
-3. Per-request role extraction from better-auth sessions (currently
-   uses default Admin role; middleware to extract role from JWT
-   session and inject per-request).
-4. Fuzzing harness + secret-management policy.
-5. Real sensor drivers (I2C/SPI/UART) for embedded binary.
-6. MQTT publish path in embedded binary (currently telemetry task
-   counts cycles only).
+1. Phase 8: integration tests in `crates/<crate>/tests/`, property tests
+   via `proptest`, benchmarks via `criterion`.
+2. Phase 9: `QueryExecutor` orchestrator, real `EmbassyRuntime::sleep`,
+   `ThedafAdapter` stub, MQTT retained messages, apalis queue stub.
+3. Phase 10: controller/estimator/ML failure detection + ML-degrade-to-
+   EKF-only fallback.
+4. Phase 11: `embassy-net` TCP transport + embedded MQTT publish +
+   command subscribe.
+5. Phase 12: TrainerKind dispatch + pruning + sparsification + online
+   adaptation trait method (compile-only, tch-backend tests deferred).
+6. Phase 13: dioxus 0.7 fullstack UI + pnpm/Tailwind/Playwright
+   toolchain + SPEC.toml amendment for pnpm carve-out.
 
 ## Open questions / blockers
 
 None.
+
 ## 2026-08-20 — themql-sse real implementation (Stage 8)
 
 Rewrote `crates/themql-sse/src/lib.rs` to flow real `SseEvent`s through

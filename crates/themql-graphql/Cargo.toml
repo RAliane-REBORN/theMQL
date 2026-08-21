@@ -21,3 +21,8 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+criterion.workspace = true
+
+[[bench]]
+name = "resolve"
+harness = false

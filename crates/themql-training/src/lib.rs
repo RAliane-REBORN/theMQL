@@ -364,8 +364,12 @@ fn train_dense(
 
     let _ = best_epoch;
 
-    let model_bytes = export_torchscript_bytes(&net, feat_i64, lab_i64, batch_i64)
-        .map_err(TrainingError::ArtifactEmissionFailed)?;
+    let model_bytes =
+        export_torchscript_bytes(&net, feat_i64, lab_i64, batch_i64).map_err(|e| {
+            TrainingError::ArtifactEmissionFailed(themql_artifact::ArtifactError::ValidationFailed(
+                e,
+            ))
+        })?;
 
     let final_loss = if best_loss.is_finite() {
         best_loss
@@ -457,10 +461,7 @@ fn export_torchscript_bytes(
 // ===========================================================================
 
 /// Errors raised during training, pruning, sparsification, or artifact
-/// emission. Mirrors `specs/training.toml [api.TrainingError]`; the
-/// `ArtifactEmissionFailed` variant carries a `String` rather than an
-/// `ArtifactError` because `themql-artifact` does not yet export that
-/// type.
+/// emission. Mirrors `specs/training.toml [api.TrainingError]`.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum TrainingError {
     /// The dataset was malformed or empty.
@@ -485,7 +486,7 @@ pub enum TrainingError {
     SparsificationFailed(String),
     /// Artifact emission failed.
     #[error("artifact emission failed: {0}")]
-    ArtifactEmissionFailed(String),
+    ArtifactEmissionFailed(#[from] themql_artifact::ArtifactError),
     /// Unexpected internal failure.
     #[error("internal error: {0}")]
     InternalError(String),

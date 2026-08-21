@@ -382,8 +382,8 @@ impl EmbeddedRuntime for EmbassyRuntime {
         self.spawner
     }
 
-    fn sleep(&self, _dur: std::time::Duration) -> impl Future<Output = ()> + Send {
-        embassy_future_sleep()
+    fn sleep(&self, dur: std::time::Duration) -> impl Future<Output = ()> + Send {
+        embassy_future_sleep(dur)
     }
 
     fn signal<T: Send>(
@@ -401,8 +401,9 @@ impl EmbeddedRuntime for EmbassyRuntime {
 }
 
 #[cfg(feature = "embedded")]
-fn embassy_future_sleep() -> impl Future<Output = ()> + Send {
-    std::future::pending::<()>()
+fn embassy_future_sleep(dur: std::time::Duration) -> impl Future<Output = ()> + Send {
+    let micros = u64::try_from(dur.as_micros()).unwrap_or(u64::MAX);
+    embassy_time::Timer::after(embassy_time::Duration::from_micros(micros))
 }
 
 // ===========================================================================

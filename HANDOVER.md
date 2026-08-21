@@ -63,15 +63,29 @@ Phase 5 — 3 steps:
 
 ### What is NOT done (follow-ups, not blockers)
 
-- GNC/estimation crates are not `no_std` — embassy tasks stub the
-  EKF/controller logic. Making themql-gnc/themql-estimation `no_std`
-  is a future phase.
-- GraphQL field-level authz (subject-pattern ACLs per role) not
-  implemented — only authn (session creation) is wired.
-- MQTT topic filter ACLs per client id not implemented.
+- GNC/estimation crates are now `no_std + alloc` (Phase 5); the
+  embedded binary runs a real EKF + HybridController pipeline. The
+  `EmbassyRuntime::sleep` impl is still a stub (`std::future::pending`)
+  — Phase 9 addresses this.
+- GraphQL field-level authz is implemented (`RoleGuard` per-request
+  role extraction via better-auth sessions, Phase 6). MQTT topic ACLs
+  via `MqttAcl`/`AclRule` are implemented (Phase 5). WS subscription
+  role extraction defaults to Observer at upgrade time; per-connection
+  session resolution is a follow-up.
 - `tch-backend` feature tests not run (libtorch + RAM).
 - No fuzzing harness, no secret-management policy.
 - `mold` + `sccache` not installed (config ready in `.cargo/config.toml`).
+- No integration tests, property tests, or benchmarks (Phase 8).
+- No `QueryExecutor` orchestrator, real `EmbassyRuntime::sleep`,
+  `ThedafAdapter` impl, MQTT retained messages, or apalis queue
+  wiring (Phase 9).
+- No controller/estimator/ML failure detection or ML-degrade-to-EKF-only
+  fallback (Phase 10).
+- No `embassy-net` TCP transport for embedded MQTT publish or command
+  subscription (Phase 11).
+- No PINN/GB/fine-tuning trainer variants, no pruning/sparsification
+  application (Phase 12, compile-only).
+- No dioxus desktop UI; only ratatui TUI (Phase 13).
 
 ### Environment constraints
 

@@ -5,6 +5,195 @@ Update after every turn (see `MEMORY.md` standing rules).
 
 ## [Unreleased]
 
+### 2026-08-20 — Phase 9: core runtime closures
+
+Third phase of the 7-phase sweep. Closes several mid-size spec gaps.
+
+#### 9.1 DefaultQueryExecutor orchestrator (themql-query)
+
+- New `QueryCache` trait: minimal `get`/`put` interface for
+  `DefaultQueryExecutor`. Avoids circular dep on `themql-cache`
+  (which depends on `themql-query` for `CacheKey`). An adapter
+  blanket-impl can be provided in `themql-cache` for any `Cache` that
+  stores `CacheEntry`-like values.
+- New `DefaultQueryExecutor<C: QueryCache>`: wraps `Arc<dyn
+  Resolver>`, checks `Context.cancellation.is_cancelled()` →
+  `Error::timeout`, checks `Context.deadline.is_expired(now)` →
+  `Error::timeout`, optional cache read (if `cache_policy.enabled`
+  and not `bypass`), invokes `Resolver::resolve`, optional cache
+  write-through on miss. Uses `DefaultCacheKeyer` for key derivation.
+- +5 tests: invoke-resolver-on-miss, timeout-on-cancelled,
+  write-through-on-miss, bypass-skips-cache-read,
+  disabled-skips-read-and-write.
+
+#### 9.2 Real EmbassyRuntime::sleep (themql-runtime)
+
+- Replaced `std::future::pending()` stub with
+  `embassy_time::Timer::after(embassy_time::Duration::from_micros(...))`.
+- Added `embassy-time` to the `embedded` feature in
+  `themql-runtime/Cargo.toml`.
+
+#### 9.3 StubThedafAdapter (themql-analysis)
+
+- Concrete impl of `ThedafAdapter` returning
+  `AnalysisError::ThedafError("thedaf adapter not configured")` for
+  both `fetch_legacy` and `list_legacy_datasets`. Gives consumers a
+  type to compose against while real theDAF integration is future work.
+
+#### 9.4 MQTT retained messages (themql-mqtt)
+
+- Added `publish_retained` method to `MqttPublisher` trait. The
+  `RumqttcTransport` impl passes `retain=true` to rumqttc
+  `publish()`. Per `specs/mqtt.toml [topics] retained = "supported
+  for last-known-value telemetry"`.
+
+#### 9.5 Apalis queue stub (themql-desktop)
+
+- Added `apalis.workspace = true` dep. New `JobQueue` trait
+  (`enqueue`/`pending_count`) + `InMemoryJobQueue` stub impl
+  (`Mutex<Vec>`). Real apalis integration (persistent storage,
+  workers, retries) is future work.
+
+#### Validation
+
+- `cargo fmt --check`, `cargo check --workspace --all-targets`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (402 tests, was 397; +5 from
+  QueryExecutor tests), `cargo deny check`, `cargo machete`,
+  TOML sanity, `scripts/ci_guard.py`, `cargo metadata`, embedded
+  cross-compile (thumbv7em-none-eabihf) — all green.
+- No `unsafe` introduced.
+
+### 2026-08-20 — Phase 8: testing infrastructure (integration/property/bench)
+
+Second phase of the 7-phase sweep. Closes `SPEC.toml [quality]` gaps:
+`integration_tests_required = true`, `property_tests_required = true`,
+`benchmark_hot_paths = true`.
+
+#### 8.1 Integration tests (in `crates/<crate>/tests/` dirs)
+
+- `themql-cache/tests/tiered_flow.rs` — 4 tests: L4 sled promotes to
+  L1 on hit, invalidate removes from all tiers, disabled policy returns
+  miss, bypass policy skips read but writes through.
+- `themql-storage/tests/sled_round_trip.rs` — 5 tests: put/get
+  round-trip, delete, get-missing, query-by-key, overwrite.
+- `themql-graphql/tests/resolver_subscription_e2e.rs` — 2 tests:
+  GraphQL query through resolver bridge end-to-end, GraphQL
+  subscription streams events from SSE publisher.
+- `themql-desktop/tests/serve_boot.rs` — 2 tests: serve builds real
+  axum router without auth (POST /graphql), serve builds router with
+  SSE endpoint (GET /events). Uses `tower::ServiceExt::oneshot` for
+  router testing without TCP binding.
+
+#### 8.2 Property tests (via `proptest` workspace dep)
+
+- `themql-core/tests/subject_property.rs` — 7 property tests:
+  Subject round-trips through string, clone equals original, is
+  always concrete, Display equals as_str, pattern matches itself,
+  wildcard-multi matches any subpath, wildcard-one matches exactly
+  one segment.
+- `themql-query/tests/cache_key_property.rs` — 5 property tests:
+  CacheKeyer is deterministic, distinct for distinct subjects, hash_of
+  is deterministic, hash_of distinct for distinct input, Display is
+  64-char hex.
+- `themql-estimation/tests/ekf_property.rs` — 5 property tests (64
+  cases each): predict preserves covariance symmetry, predict
+  preserves quaternion norm, update_gps preserves covariance
+  symmetry, update_baro preserves covariance symmetry, predict
+  rejects nonpositive dt.
+- `themql-gnc/tests/hybrid_property.rs` — 2 property tests (64 cases
+  each): hybrid PID step produces finite output for bounded inputs,
+  hybrid step rejects nonpositive dt.
+
+#### 8.3 Benchmarks (via `criterion` workspace dep, `harness = false`)
+
+- `themql-estimation/benches/ekf_step.rs` — 3 benchmarks: ekf_predict,
+  ekf_predict_then_gps_update, ekf_predict_then_baro_update.
+- `themql-cache/benches/tiered.rs` — 5 benchmarks: l1_get_hit, l1_put,
+  l2_get_hit, tiered_l1_hit_async, tiered_l4_sled_hit_async.
+- `themql-graphql/benches/resolve.rs` — 1 benchmark:
+  graphql_resource_query.
+
+#### New workspace deps
+
+- `proptest = "1"` (dev-dep in core, query, estimation, gnc).
+- `criterion = { version = "0.5", features = ["async_tokio"] }` (dev-dep
+  in estimation, cache, graphql).
+- `tower = "0.5"` (dev-dep in desktop for router testing).
+
+#### Validation
+
+- `cargo fmt --check` — clean.
+- `cargo check --workspace --all-targets` — clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- `cargo test --workspace` — 397 tests pass (was 365; +32 from
+  integration + property tests). 0 failures.
+- `cargo deny check`, `cargo machete --with-metadata`, TOML sanity,
+  `scripts/ci_guard.py`, `cargo metadata`, embedded cross-compile
+  (thumbv7em-none-eabihf) — all green.
+- Benches compile clean (not run — `cargo bench` is a separate
+  invocation; verified via `cargo check --all-targets`).
+
+### 2026-08-20 — Phase 7: doc + spec-deviation cleanup
+
+First phase of a 7-phase sweep (Phases 7-13) on a single branch
+`feat/phase-7-13-comprehensive`. No new features; closes spec-deviation
+gaps in safety-critical crates and refreshes stale living docs.
+
+#### 7.1 Refresh stale docs
+
+- `HANDOVER.md`: removed stale "What is NOT done" claims (no_std GNC
+  not done, authz/ACLs not implemented) — replaced with current state +
+  Phase 8-13 follow-ups.
+- `BUGS.md`: removed stale Phase-3-era follow-ups (GraphQL subscription
+  placeholder, desktop subcommand banners-only, WS role defaults).
+  Replaced with current spec-implementation gaps grouped by phase
+  (Phase 8-13 scope).
+- `MEMORY.md`: test count 304 → 365; status line updated to Phase 7;
+  Phase 7 entry added to decision log.
+- `SECURITY.md`: "Known limitations" section updated to reflect
+  Phase 4/5/6 transport-layer authz (RoleGuard, MqttAcl) — removed
+  stale "no transport-layer authn/authz policy" claim.
+
+#### 7.2 Fix 3 spec deviations in safety-critical crates
+
+- **`themql-inference`** (`crates/themql-inference/src/lib.rs`):
+  - `RollbackHandle.previous_model: TrainedModel` (was
+    `previous_model_bytes: Vec<u8>`); `restore()` now returns
+    `Result<TrainedModel, InferenceError>` (was `Result<Vec<u8>, _>`).
+    Matches `specs/inference.toml [api.RollbackHandle]`.
+  - `InferenceError::ArtifactInvalid(ArtifactError)` (was
+    `ArtifactInvalid(String)`); `From<ArtifactError>` impl simplified
+    to `Self::ArtifactInvalid(e)`. Matches
+    `specs/inference.toml [api.InferenceError]`.
+  - `InferenceError::BudgetExceeded { used: ResourceBudget, limit:
+    ResourceBudget }` (was `{ used_cpu: u8, limit_cpu: u8 }`).
+    `ResourceBudget::new()` updated to construct full `ResourceBudget`
+    for both `used` and `limit`. Matches spec.
+  - Added `InferenceError::AdaptationNotImplemented(String)` and
+    `InferenceError::InternalError(String)` variants for Phase 12
+    online-adaptation work (spec allows extension; the core 7 variants
+    match exactly).
+  - TchInferenceEngine tch-backend impl + tests updated for the new
+    shapes.
+- **`themql-training`** (`crates/themql-training/src/lib.rs`):
+  - `TrainingError::ArtifactEmissionFailed(#[from]
+    themql_artifact::ArtifactError)` (was `String`); the `#[from]`
+    attribute gives `?` ergonomics for `ArtifactError` sources. The
+    `export_torchscript_bytes` call-site (returns `Result<_, String>`)
+    was updated to wrap strings in `ArtifactError::ValidationFailed(
+    String)`. Matches `specs/training.toml [api.TrainingError]`.
+
+#### Validation
+
+- `cargo fmt --check` — clean.
+- `cargo check -p themql-inference -p themql-training` — clean.
+- `cargo test -p themql-inference -p themql-training` — 6 + 6 = 12
+  tests pass (default features).
+- `tch-backend` feature compiles clean (libtorch C++ build OOM in
+  7.8GB env — tests not run, per known limitation).
+- No `unsafe` introduced.
+
 ### 2026-08-20 — Rust 1.98.0 toolchain drift fix
 
 Rust 1.98.0 stable (88d9e12ae 2026-08-18) released during PR #7 review.

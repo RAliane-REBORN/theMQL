@@ -10,13 +10,14 @@ path = "src/lib.rs"
 
 [features]
 desktop = ["tokio"]
-embedded = ["embassy-sync", "embassy-executor"]
+embedded = ["embassy-sync", "embassy-executor", "embassy-time"]
 
 [dependencies]
 thiserror.workspace = true
 tokio = { workspace = true, optional = true, features = ["rt", "time", "sync"] }
 embassy-sync = { workspace = true, optional = true }
 embassy-executor = { workspace = true, optional = true }
+embassy-time = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "sync", "test-util", "macros"] }

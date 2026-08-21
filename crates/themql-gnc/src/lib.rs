@@ -193,12 +193,97 @@ pub enum GncError {
     /// Internal controller failure.
     #[error("internal gnc error: {0}")]
     InternalError(String),
+    /// Controller health check failed (NaN, Inf, saturation, or
+    /// quaternion-norm violation detected by [`ControllerHealth`]).
+    #[error("controller health check failed: {reason}")]
+    HealthCheckFailed {
+        /// Why the health check failed.
+        reason: String,
+    },
 }
 
 #[cfg(feature = "std")]
 impl From<GncError> for themql_core::Error {
     fn from(e: GncError) -> Self {
         themql_core::Error::internal_error(e.to_string())
+    }
+}
+
+// ===========================================================================
+// ControllerHealth — runtime failure detection for controllers
+// ===========================================================================
+
+/// Maximum allowed actuator command magnitude. Values beyond this are
+/// treated as saturation (health-check failure).
+const MAX_ACTUATOR_MAGNITUDE: f64 = 100.0;
+
+/// Runtime health checker for controller outputs. Detects NaN, Inf,
+/// and actuator saturation per `SPEC.toml [safety]
+/// controller_failure_must_be_detectable = true` and
+/// `specs/gnc.toml [safety] controller_health_monitoring = true`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ControllerHealth;
+
+impl ControllerHealth {
+    /// Construct a new controller health checker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Check the health of a `GncState` and `ActuatorCommand`.
+    ///
+    /// Verifies:
+    /// - All actuator values are finite (not NaN, not Inf).
+    /// - No actuator value exceeds `MAX_ACTUATOR_MAGNITUDE`.
+    /// - State position/velocity/angular_velocity are finite.
+    /// - Attitude quaternion norm is approximately 1.0.
+    ///
+    /// # Errors
+    /// Returns [`GncError::HealthCheckFailed`] on any violation.
+    pub fn check(
+        &self,
+        state: &GncState,
+        cmd: &ActuatorCommand,
+    ) -> Result<(), GncError> {
+        for i in 0..ACTUATOR_COUNT {
+            let v = cmd.values[i];
+            if !v.is_finite() {
+                return Err(GncError::HealthCheckFailed {
+                    reason: format!("actuator[{i}] not finite: {v}"),
+                });
+            }
+            if v.abs() > MAX_ACTUATOR_MAGNITUDE {
+                return Err(GncError::HealthCheckFailed {
+                    reason: format!("actuator[{i}] saturated: {v} > {MAX_ACTUATOR_MAGNITUDE}"),
+                });
+            }
+        }
+        for i in 0..3 {
+            if !state.position[i].is_finite() {
+                return Err(GncError::HealthCheckFailed {
+                    reason: format!("position[{i}] not finite"),
+                });
+            }
+            if !state.velocity[i].is_finite() {
+                return Err(GncError::HealthCheckFailed {
+                    reason: format!("velocity[{i}] not finite"),
+                });
+            }
+            if !state.angular_velocity[i].is_finite() {
+                return Err(GncError::HealthCheckFailed {
+                    reason: format!("angular_velocity[{i}] not finite"),
+                });
+            }
+        }
+        let q = state.attitude.quaternion();
+        let q_norm = (q.w * q.w + q.i * q.i + q.j * q.j + q.k * q.k).sqrt();
+        if (q_norm - 1.0).abs() > 1e-6 {
+            return Err(GncError::HealthCheckFailed {
+                reason: format!("quaternion norm {q_norm} not unit"),
+            });
+        }
+        Ok(())
     }
 }
 

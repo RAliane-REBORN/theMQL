@@ -146,7 +146,7 @@ Before a change touches anything in `themql-transport`, `themql-graphql`,
 - Does it introduce unbounded channels or blocking work on the async
   executor? (must not)
 
-## Known limitations (as of v0.1, 2026-08-20, Phase 3 Stages 1-11 complete)
+## Known limitations (as of v0.1, 2026-08-20, Phase 7 complete)
 
 All 20 crates now have real `src/` content (traits + types + error types +
 unit tests). The four safety-critical crates (themql-gnc, themql-estimation,
@@ -196,11 +196,14 @@ functions <= 60 lines, >= 2 assertions per public function as
 - No dependency audit pipeline beyond `cargo deny check` (installed and
   passing). `cargo machete` clean. `cargo bloat` passes.
 - No secret-management policy for HelixDB / Valkey credentials.
-- No transport-layer authn/authz policy (MQTT broker credentials, GraphQL
-  access control). These land in Phase 4. The SSE/MQTT/GraphQL adapters
-  now have real network I/O surfaces (axum HTTP, rumqttc MQTT client,
-  axum HTTP/WS) — transport-layer authn/authz is the next security
-  follow-up.
+- **Transport-layer authn/authz (as of Phase 4/5/6)** — GraphQL
+  per-request role extraction via `better-auth` sessions is implemented
+  (`RoleGuard` sees the actual caller role, not a global default).
+  MQTT topic ACLs via `MqttAcl` / `AclRule` (pattern matching) are
+  implemented. Auth-off mode rejects all GraphQL requests and uses
+  anonymous MQTT credentials. WS subscription role extraction defaults
+  to Observer at upgrade time; per-connection session resolution is a
+  follow-up. See `specs/auth.toml`.
 - `themql-cache` has concrete backends wired (L1 lru, L2 moka, L3 redis,
   L4 sled via themql-storage), with a key→subject index for pattern
   invalidation. L3 requires a running `redis-server` (degrades to

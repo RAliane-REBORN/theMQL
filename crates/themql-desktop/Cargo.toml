@@ -19,6 +19,7 @@ themql-schema.workspace = true
 themql-training = { workspace = true, optional = true }
 themql-mqtt.workspace = true
 better-auth.workspace = true
+apalis.workspace = true
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "signal"] }
 ratatui = { workspace = true }
@@ -29,6 +30,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tower = "0.5"
 
 [features]
 tch-backend = ["dep:themql-training", "themql-training/tch-backend"]
